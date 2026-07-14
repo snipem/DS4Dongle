@@ -99,6 +99,8 @@ bool audio_headset_plugged() {
 // interface. Tells the controller to start/stop streaming headset-mic audio
 // (input report 0x13).
 static volatile bool mic_decoder_reset_pending = false;
+static volatile bool mic_gain_pending = false;
+static uint64_t mic_open_us = 0;
 
 void set_mic_active(bool active) {
     if (active && !mic_active) {
@@ -108,6 +110,10 @@ void set_mic_active(bool active) {
         while (queue_try_remove(&mic_pcm_fifo, NULL)) {}
         mic_ring_tail = mic_ring_head;
         mic_decoder_reset_pending = true;
+        // VolumeMic sent in the same report as the mic enable doesn't take
+        // effect (capture stays near-silent); re-apply it shortly after.
+        mic_gain_pending = true;
+        mic_open_us = time_us_64();
     }
     mic_active = active;
     ds4_enable_mic(active && get_config().mic_select != 3);
@@ -183,49 +189,39 @@ static void __not_in_flash_func(audio_bt_task)() {
     bt_write(pkt, sizeof(pkt));
 }
 
-// Decoded mic PCM (16 kHz mono) -> staging ring as 32 kHz stereo (2x linear
-// interpolation) -> USB IN FIFO in at most one packet per loop pass.
+// Decoded mic PCM (16 kHz mono, the USB IN format as well) -> staging ring
+// -> USB IN FIFO in at most one packet per loop pass.
 //
-// Feeding the TinyUSB IN FIFO in 1024-byte lumps every 8 ms starved the
+// Feeding the TinyUSB IN FIFO in big lumps every 8 ms starved the
 // isochronous endpoint (its flow control holds off transmission around a
 // FIFO threshold) and the host only received ~30% of the audio, torn into
 // chunks. The ring keeps a small backlog and trickles packet-sized chunks
 // so the endpoint always has data for the next frame.
 static void __not_in_flash_func(mic_usb_task)() {
-    // Refill the ring from decoded blocks.
+    // Refill the ring from decoded blocks (256 B = 8 ms of 16 kHz mono S16).
     mic_pcm_block block{};
     while (queue_try_remove(&mic_pcm_fifo, &block)) {
         if (!mic_active) continue;
 
-        static int16_t prev = 0;
-        int16_t out[MIC_PCM_SAMPLES * 4]; // 2x rate, 2 channels
-        for (int i = 0; i < MIC_PCM_SAMPLES; i++) {
-            const int16_t s = block.data[i];
-            const int16_t mid = static_cast<int16_t>((prev + s) / 2);
-            out[i * 4 + 0] = mid;
-            out[i * 4 + 1] = mid;
-            out[i * 4 + 2] = s;
-            out[i * 4 + 3] = s;
-            prev = s;
-        }
         uint32_t used = mic_ring_head - mic_ring_tail;
-        if (MIC_RING_BYTES - used < sizeof(out)) {
-            // Producer (BT, ~32.25 kHz effective) slightly outruns the host
-            // (32.0 kHz): drop the oldest block to stay bounded.
-            mic_ring_tail += sizeof(out);
+        if (MIC_RING_BYTES - used < sizeof(block.data)) {
+            // Producer (BT, slightly fast) outruns the host: drop the oldest
+            // block to stay bounded.
+            mic_ring_tail += sizeof(block.data);
         }
-        for (uint32_t i = 0; i < sizeof(out); i++) {
-            mic_ring[(mic_ring_head + i) % MIC_RING_BYTES] = reinterpret_cast<uint8_t *>(out)[i];
+        const uint8_t *src = reinterpret_cast<const uint8_t *>(block.data);
+        for (uint32_t i = 0; i < sizeof(block.data); i++) {
+            mic_ring[(mic_ring_head + i) % MIC_RING_BYTES] = src[i];
         }
-        mic_ring_head += sizeof(out);
+        mic_ring_head += sizeof(block.data);
     }
 
     // Trickle at most one USB packet per pass into the TinyUSB FIFO.
     const uint32_t avail = mic_ring_head - mic_ring_tail;
     if (avail == 0) return;
-    uint8_t pkt[264]; // EP size: 2 ms = 66 stereo S16 frames
+    uint8_t pkt[68]; // EP size: 2 ms = 34 mono S16 samples
     uint32_t n = avail < sizeof(pkt) ? avail : sizeof(pkt);
-    n -= n % 4; // whole stereo frames only
+    n -= n % 2; // whole samples only
     if (n == 0) return;
     for (uint32_t i = 0; i < n; i++) {
         pkt[i] = mic_ring[(mic_ring_tail + i) % MIC_RING_BYTES];
@@ -253,10 +249,16 @@ void __not_in_flash_func(audio_loop)() {
     // receives. While the mic is open and no speaker audio is clocking the
     // link with 0x17 reports, prod it with a no-op 0x11 output every 8 ms
     // (one SBC mic frame period).
-    if (mic_active && get_config().mic_select != 3 && !spk_active) {
+    if (mic_active && get_config().mic_select != 3) {
         static uint64_t last_keepalive_us = 0;
         const uint64_t now_us = time_us_64();
-        if (now_us - last_keepalive_us >= 8000) {
+        if (mic_gain_pending && now_us - mic_open_us >= 200000) {
+            mic_gain_pending = false;
+            uint8_t payload[31]{};
+            payload[0] = 0x40;  // EnableVolumeMicUpdate
+            payload[20] = 0x20; // VolumeMic; max (0x40) clips on close-talking
+            ds4_output(payload, sizeof(payload));
+        } else if (!spk_active && now_us - last_keepalive_us >= 8000) {
             last_keepalive_us = now_us;
             const uint8_t payload[31]{}; // flags 0x00: change nothing
             ds4_output(payload, sizeof(payload));

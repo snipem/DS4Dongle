@@ -123,15 +123,17 @@
 #define CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX      2
 #define CFG_TUD_AUDIO_FUNC_1_RESOLUTION_RX              16
 
-// Microphone (IN/TX) path: 1-channel, 16-bit
-#define CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX              2
+// Microphone (IN/TX) path: 1-channel, 16-bit, 16 kHz — the DS4's native
+// headset-mic format (the 2-ch/32 kHz was DS5 heritage).
+#define CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX              1
 #define CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_TX      2
 #define CFG_TUD_AUDIO_FUNC_1_RESOLUTION_TX              16
+#define CFG_TUD_AUDIO_FUNC_1_SAMPLE_RATE_TX             16000
 
 // UAC1 Full-Speed endpoint size. 32 kHz = the DS4's native BT audio rate.
 #define CFG_TUD_AUDIO_FUNC_1_SAMPLE_RATE            32000
 #define CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_OUT     TUD_AUDIO_EP_SIZE(false, CFG_TUD_AUDIO_FUNC_1_SAMPLE_RATE, CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX, CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX)
-#define CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_IN      TUD_AUDIO_EP_SIZE(false, CFG_TUD_AUDIO_FUNC_1_SAMPLE_RATE, CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_TX, CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX)
+#define CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_IN      TUD_AUDIO_EP_SIZE(false, CFG_TUD_AUDIO_FUNC_1_SAMPLE_RATE_TX, CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_TX, CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX)
 #define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX          CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_OUT
 // Mic IN packets carry 2 ms of audio (264 B): with nominal 1 ms packets the
 // ISO IN endpoint only transmitted on every other frame (re-arm missed the

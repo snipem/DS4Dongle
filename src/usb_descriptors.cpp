@@ -214,8 +214,8 @@ uint8_t descriptor_configuration[] = {
     0x04, // bTerminalID: 4
     0x02, 0x04, // wTerminalType: Headset (0x0402)
     0x03, // bAssocTerminal: 3 (paired with speaker)
-    0x02, // bNrChannels: 2 (mono mic duplicated; matches the real DS5's 2-ch mic)
-    0x03, 0x00, // wChannelConfig: Front Left + Front Right
+    0x01, // bNrChannels: 1 (DS4 headset mic is mono; the 2-ch was DS5 heritage)
+    0x00, 0x00, // wChannelConfig: mono
     0x00, // iChannelNames: 0
     0x00, // iTerminal: 0
 
@@ -329,16 +329,17 @@ uint8_t descriptor_configuration[] = {
     0x01, // bDelay: 1 frame
     0x01, 0x00, // wFormatTag: PCM (0x0001)
 
-    // Format Type Descriptor (1-channel, 16-bit, 48kHz)
+    // Format Type Descriptor (mic: 1-channel, 16-bit, 16 kHz — the DS4's
+    // native headset-mic format)
     0x0B, // bLength: 11
     0x24, // bDescriptorType: CS_INTERFACE
     0x02, // bDescriptorSubtype: FORMAT_TYPE
     0x01, // bFormatType: TYPE_I
-    0x02, // bNrChannels: 2
+    0x01, // bNrChannels: 1
     0x02, // bSubframeSize: 2
     0x10, // bBitResolution: 16
     0x01, // bSamFreqType: 1
-    0x00, 0x7D, 0x00, // tSamFreq: 32000 Hz
+    0x80, 0x3E, 0x00, // tSamFreq: 16000 Hz
 
     // Endpoint Descriptor (Audio IN: EP2)
     0x09, // bLength
@@ -347,8 +348,9 @@ uint8_t descriptor_configuration[] = {
     0x05, // bmAttributes: Isochronous, Asynchronous
     // 2 ms of audio per packet: the device-side ISO IN re-arm misses every
     // other full-speed frame, which halved the delivered rate with 1 ms
-    // packets (host measured 16.8 kHz). Double packets keep 32 kHz intact.
-    0x08, 0x01, // wMaxPacketSize: 264 bytes ((2*32+2) samples * 2 ch * 2 bytes)
+    // packets (host measured 16.8 kHz of 32 kHz). Double packets keep the
+    // full rate intact.
+    0x44, 0x00, // wMaxPacketSize: 68 bytes ((2*16+2) samples * 1 ch * 2 bytes)
     0x01, // bInterval: 1
     0x00, // bRefresh
     0x00, // bSynchAddress
