@@ -11,7 +11,6 @@
 #include "bt.h"
 #include "config.h"
 #include "device/usbd.h"
-#include "pico/bootrom.h"
 #include "pico/time.h"
 #include "audio.h"
 #include "wake.h"
@@ -81,7 +80,6 @@ void pico_cmd_set(uint8_t report_id, uint8_t const *buffer, uint16_t bufsize) {
     // 0x01 update config in variable
     // 0x02 write config to flash
     // 0x03 reconnect tinyusb device;
-    // 0x04 reboot into BOOTSEL for reflashing (tools/reboot_bootsel.py)
     // 0x05 set the raw DS4 volume byte (debug: bypasses the USB dB mapping,
     //      for the jack->line-in RMS sweep; volatile, next USB volume event
     //      overwrites it)
@@ -105,10 +103,6 @@ void pico_cmd_set(uint8_t report_id, uint8_t const *buffer, uint16_t bufsize) {
         tud_disconnect();
         sleep_ms(150);
         tud_connect();
-    }
-    if (buffer[0] == 0x04) {
-        printf("[CMD] Reboot into BOOTSEL\n");
-        reset_usb_boot(0, 0);
     }
     if (buffer[0] == 0x05 && bufsize >= 2) {
         printf("[CMD] Set raw volume byte %u\n", buffer[1]);
