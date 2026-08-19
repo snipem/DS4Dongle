@@ -116,6 +116,15 @@ void config_valid() {
         body->lock_volume = 0;
         printf("[Config] lock_volume is invalid\n");
     }
+    // Default on (a config written by an older firmware reads 0xFF here and so
+    // lands on the default): hide the USB audio device until a headset is in the
+    // controller's jack, so the host auto-switches to it on plug like a real
+    // headset. Costs a USB re-enumeration on every jack change (the host briefly
+    // re-detects the controller); set to 0 to keep the audio device always on.
+    if (body->audio_follow_jack > 1) {
+        body->audio_follow_jack = 1;
+        printf("[Config] audio_follow_jack is invalid\n");
+    }
 }
 
 void config_load() {

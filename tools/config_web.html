@@ -1,0 +1,297 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>DS4Dongle Config</title>
+
+<h1>DS4Dongle Config</h1>
+
+<p>
+Chrome/Edge only (WebHID). Serve this file over http://localhost -- WebHID is
+not available on file:// URLs. From the repo root:
+<code>python -m http.server 8000</code>, then open
+<code>http://localhost:8000/tools/config_web.html</code>.
+</p>
+
+<p>
+<button id="connect">Connect</button>
+<button id="read" disabled>Read from device</button>
+<button id="apply" disabled>Apply (RAM only)</button>
+<button id="save" disabled>Apply + save to flash</button>
+<button id="reconnect" disabled>Reconnect USB</button>
+</p>
+
+<p id="status">Not connected.</p>
+<p id="device"></p>
+
+<form id="form"></form>
+
+<h2>Log</h2>
+<pre id="log"></pre>
+
+<script>
+"use strict";
+
+// --- protocol (mirrors tools/config_tool.py and src/cmd.cpp) ---------------
+const VID = 0x054C, PID = 0x09CC;
+const REPORT_SET = 0xF6;          // SET_FEATURE: [funcid][payload...]
+const REPORT_GET_CONFIG = 0xF7;   // GET_FEATURE: raw Config_body
+const REPORT_GET_VERSION = 0xF8;  // GET_FEATURE: firmware version string
+const REPORT_GET_STATUS = 0xF9;   // GET_FEATURE: [rssi][audio flags]
+const FUNC_UPDATE = 0x01, FUNC_SAVE = 0x02, FUNC_RECONNECT = 0x03;
+const SET_DATA_LEN = 63;          // data bytes after the report id
+const CONFIG_VERSION = 6;         // src/config.cpp CONFIG_VERSION (display only)
+
+// Packed Config_body layout (src/config.h). The "res" entries are DualSense-only
+// slots the DS4 firmware ignores; they are read and written back verbatim so the
+// byte layout stays aligned. Order and sizes MUST match the firmware struct.
+const FIELDS = [
+  {name: "config_version",      size: 1, ro: true, help: "config schema version (managed by firmware)"},
+  {name: "_haptics_gain",       size: 4, res: true},
+  {name: "speaker_volume",      size: 1, min: 0, max: 127, help: "[0,127] seeds the initial USB speaker volume"},
+  {name: "_headset_gain",       size: 2, res: true},
+  {name: "inactive_time",       size: 1, min: 0, max: 60, help: "[0,60] minutes (0 disables the idle disconnect)"},
+  {name: "disable_pico_led",    size: 1, min: 0, max: 1, help: "0/1"},
+  {name: "polling_rate_mode",   size: 1, min: 0, max: 2, help: "0:250Hz 1:500Hz 2:real-time"},
+  {name: "_buf_mode",           size: 2, res: true},
+  {name: "enable_usb_sn",       size: 1, min: 0, max: 1, help: "0/1 (USB serial number)"},
+  {name: "ps_shortcut_enabled", size: 1, min: 0, max: 1, help: "0/1 (Xbox Game Bar via HID keyboard)"},
+  {name: "mic_select",          size: 1, min: 0, max: 3, help: "0:auto 1:builtin 2:headphone 3:disable"},
+  {name: "speaker_select",      size: 1, min: 0, max: 3, help: "0:auto 1:builtin 2:headphone 3:disable"},
+  {name: "enable_wake",         size: 1, min: 0, max: 1, help: "0/1 (wake host on PS press)"},
+  {name: "_trigger_reduce",     size: 1, res: true},
+  {name: "lock_volume",         size: 1, min: 0, max: 1, help: "0/1 (ignore in-game volume changes)"},
+  {name: "audio_follow_jack",   size: 1, min: 0, max: 1, help: "0/1 (1: USB audio device only while a headset is in the jack)"},
+];
+const BODY_SIZE = FIELDS.reduce(function (n, f) { return n + f.size; }, 0);
+const VISIBLE = FIELDS.filter(function (f) { return !f.res; });
+
+let device = null;
+let body = null; // Uint8Array holding the last read Config_body
+
+function log(msg) {
+  document.getElementById("log").textContent +=
+    new Date().toLocaleTimeString() + "  " + msg + "\n";
+}
+
+function setStatus(msg) {
+  document.getElementById("status").textContent = msg;
+}
+
+function offsetOf(name) {
+  let off = 0;
+  for (const f of FIELDS) {
+    if (f.name === name) return off;
+    off += f.size;
+  }
+  throw new Error("unknown field " + name);
+}
+
+// Chrome includes the report id as byte 0 of a feature report on some platforms
+// and omits it on others -- the same ambiguity config_tool.py handles.
+function stripReportId(view, reportId, expectedLen) {
+  const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+  if (bytes.length > expectedLen && bytes[0] === reportId) return bytes.slice(1);
+  return bytes;
+}
+
+function buildForm() {
+  const form = document.getElementById("form");
+  form.innerHTML = "";
+  for (const f of VISIBLE) {
+    const id = "f_" + f.name;
+    const label = document.createElement("label");
+    label.setAttribute("for", id);
+    label.textContent = f.name + " ";
+    const input = document.createElement("input");
+    input.type = "number";
+    input.id = id;
+    input.disabled = true;
+    if (f.ro) input.readOnly = true;
+    if (f.min !== undefined) {
+      input.min = f.min;
+      input.max = f.max;
+    }
+    const help = document.createElement("small");
+    help.textContent = "  " + (f.help || "");
+    form.append(label, input, help, document.createElement("br"));
+  }
+}
+
+function formFromBody() {
+  for (const f of VISIBLE) {
+    const input = document.getElementById("f_" + f.name);
+    input.value = body[offsetOf(f.name)];
+    input.disabled = false;
+  }
+}
+
+// Copy the form back into the body buffer, leaving the reserved slots untouched.
+function bodyFromForm() {
+  for (const f of VISIBLE) {
+    if (f.ro) continue;
+    const raw = document.getElementById("f_" + f.name).value;
+    const v = Number(raw);
+    if (!Number.isInteger(v) || v < f.min || v > f.max) {
+      throw new Error(f.name + ': "' + raw + '" is out of range (' + f.min + ".." + f.max + ")");
+    }
+    body[offsetOf(f.name)] = v;
+  }
+}
+
+function setButtons(connected) {
+  for (const id of ["read", "apply", "save", "reconnect"]) {
+    document.getElementById(id).disabled = !connected;
+  }
+}
+
+// The config lives on the gamepad collection (usage page 0x01, usage 0x05);
+// a wake-enabled build also presents a keyboard collection.
+function isGamepad(dev) {
+  return dev.collections.some(function (c) {
+    return c.usagePage === 0x01 && c.usage === 0x05;
+  });
+}
+
+async function readConfig() {
+  const view = await device.receiveFeatureReport(REPORT_GET_CONFIG);
+  const data = stripReportId(view, REPORT_GET_CONFIG, BODY_SIZE);
+  if (data.length < BODY_SIZE) {
+    throw new Error("short config read: got " + data.length + " bytes, expected " + BODY_SIZE);
+  }
+  body = data.slice(0, BODY_SIZE);
+  const ver = body[offsetOf("config_version")];
+  if (ver !== CONFIG_VERSION) {
+    log("WARNING: device reports config_version " + ver + ", this page expects " +
+        CONFIG_VERSION + ". The byte layout may not match -- do not save.");
+  }
+  formFromBody();
+  log("read config: " + Array.from(body).map(function (b) {
+    return b.toString(16).padStart(2, "0");
+  }).join(" "));
+}
+
+async function sendSet(funcid, payload) {
+  const data = new Uint8Array(SET_DATA_LEN);
+  data[0] = funcid;
+  if (payload) data.set(payload.subarray(0, SET_DATA_LEN - 1), 1);
+  await device.sendFeatureReport(REPORT_SET, data);
+}
+
+async function readInfo() {
+  let text = "";
+  try {
+    const v = await device.receiveFeatureReport(REPORT_GET_VERSION);
+    const raw = stripReportId(v, REPORT_GET_VERSION, 1);
+    const end = raw.indexOf(0);
+    const str = new TextDecoder().decode(end < 0 ? raw : raw.subarray(0, end));
+    text += "firmware " + str.trim();
+  } catch (e) {
+    // version report is optional
+  }
+  try {
+    const s = await device.receiveFeatureReport(REPORT_GET_STATUS);
+    const raw = stripReportId(s, REPORT_GET_STATUS, 2);
+    const rssi = raw[0] > 127 ? raw[0] - 256 : raw[0];
+    text += ", RSSI " + rssi + " dBm";
+    if (raw.length > 1 && (raw[1] & 0x80)) {
+      text += ", mic " + ((raw[1] & 0x01) ? "streaming" : "idle");
+      text += ", speaker " + ((raw[1] & 0x02) ? "driven" : "idle");
+    }
+  } catch (e) {
+    // status report is optional
+  }
+  document.getElementById("device").textContent = text;
+}
+
+function explainError(e) {
+  let msg = String(e);
+  if (navigator.userAgent.includes("Windows")) {
+    msg += "\n\nOn Windows this is expected: the config report IDs 0xF6-0xF9 are " +
+           "handled by the firmware but are NOT declared in the DS4 HID report " +
+           "descriptor (kept byte-identical to a real DS4 v2), and Windows blocks " +
+           "GET/SET_FEATURE for undeclared report IDs. This page works as-is on " +
+           "Linux, macOS and ChromeOS; on Windows the firmware has to declare " +
+           "those reports first.";
+  }
+  return msg;
+}
+
+document.getElementById("connect").addEventListener("click", async function () {
+  try {
+    if (!navigator.hid) {
+      setStatus("navigator.hid is unavailable. Use Chrome/Edge over http://localhost, not file://.");
+      return;
+    }
+    const picked = await navigator.hid.requestDevice({
+      filters: [{vendorId: VID, productId: PID}]
+    });
+    if (!picked.length) {
+      setStatus("No device selected.");
+      return;
+    }
+    device = picked.find(isGamepad) || picked[0];
+    if (!device.opened) await device.open();
+    setStatus("Connected: " + device.productName);
+    setButtons(true);
+    log("connected to " + device.productName);
+    await readConfig();
+    await readInfo();
+  } catch (e) {
+    setStatus("Connect failed.");
+    log(explainError(e));
+  }
+});
+
+document.getElementById("read").addEventListener("click", async function () {
+  try {
+    await readConfig();
+    await readInfo();
+    setStatus("Read OK.");
+  } catch (e) {
+    setStatus("Read failed.");
+    log(explainError(e));
+  }
+});
+
+document.getElementById("apply").addEventListener("click", async function () {
+  try {
+    bodyFromForm();
+    await sendSet(FUNC_UPDATE, body);
+    setStatus("Applied to RAM (lost on reboot -- use Apply + save to persist).");
+    log("applied config to RAM");
+  } catch (e) {
+    setStatus("Apply failed.");
+    log(explainError(e));
+  }
+});
+
+document.getElementById("save").addEventListener("click", async function () {
+  try {
+    bodyFromForm();
+    await sendSet(FUNC_UPDATE, body);
+    await sendSet(FUNC_SAVE, null);
+    setStatus("Applied and saved to flash.");
+    log("applied + saved config to flash");
+  } catch (e) {
+    setStatus("Save failed.");
+    log(explainError(e));
+  }
+});
+
+// audio_follow_jack, the polling rate and the wake/keyboard interface only take
+// effect on a fresh enumeration, so offer the firmware's own USB reconnect.
+document.getElementById("reconnect").addEventListener("click", async function () {
+  try {
+    await sendSet(FUNC_RECONNECT, null);
+    setStatus("Reconnect sent -- the device leaves the bus and comes back; press Connect again.");
+    log("sent USB reconnect");
+    setButtons(false);
+    device = null;
+  } catch (e) {
+    setStatus("Reconnect failed.");
+    log(explainError(e));
+  }
+});
+
+buildForm();
+setStatus("Not connected. Press Connect and pick the Wireless Controller.");
+</script>

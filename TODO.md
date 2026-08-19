@@ -155,7 +155,22 @@
   `set_headset()` above the guard so the headset-jack flag still updates on a
   report that fails the sanity check (guards against headset audio routing to
   the built-in speaker if the guard ever fires); (2) `plug_headset` isn't
-  cleared on disconnect, so it latches across an unplug (harmless today).
+  cleared on disconnect, so it latches across an unplug (harmless today --
+  the synthetic `state_init_data` report pushed on disconnect zeroes the ext
+  byte and so clears it). Note (1) matters more now that `audio_follow_jack`
+  gates whether the USB audio device is exposed at all: a jack flag stuck on a
+  stale value costs a spurious re-enumeration.
+
+- `audio_follow_jack` (USB audio device only while the jack is occupied, on by
+  default) verified on hardware 2026-08-19 (DS4 v1 + Pico 2 W, Windows 11 host): the
+  audio endpoints and the `MI_00` audio function come and go with the headset,
+  Windows switches its default output, and controller input is not interrupted.
+  Known cosmetic caveat: hiding/showing the audio function requires a USB
+  re-enumeration, so the host re-detects the controller for a moment on each
+  jack transition (visible as a Steam reconnect). Inherent to UAC1 -- interfaces
+  cannot be added/removed without leaving the bus. If it ever needs to be less
+  visible, `REENUM_GAP_MS` (bus-down window, 150 ms) and `JACK_DEBOUNCE_MS`
+  (300 ms) in src/usb.cpp are the knobs.
 
 - Dual audio sinks (speaker + headphone jack as two USB audio functions):
   first attempt failed; retry on top of the fixed sequential L2CAP pairing

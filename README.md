@@ -27,11 +27,39 @@ See [Releases](https://github.com/snipem/DS4Dongle/releases) for the images.
 - Audio out to the controller speaker and headphone jack: USB audio at the
   DS4's native 32 kHz stereo, SBC-encoded on-device (no resampling); routing
   auto-switches when a headset is plugged into the jack
+- Headset-style audio device (`audio_follow_jack`, on by default): like a PS4,
+  the dongle only presents a USB audio device while something is plugged into
+  the controller's 3.5 mm jack, so Windows and friends switch their default
+  output to it on plug and back off on unplug. Two consequences: while the jack
+  is empty there is no audio device at all (the built-in speaker is unreachable
+  too, unless `speaker_select=1`), and showing/hiding it requires a USB
+  re-enumeration, so the host briefly re-detects the controller on each jack
+  transition (Steam shows a reconnect; input is not interrupted). Set
+  `audio_follow_jack=0` for a permanently visible audio device
 - Volume/mute from the host mapped to the controller
 - Pairing and controller management via the BOOTSEL button, persistent
   pairings and blacklist in flash
-- Configurable over HID feature reports (`tools/config_tool.py`): polling
-  rate, audio routing, inactivity timeout, wake-on-PS, and more
+- Configurable over HID feature reports (`tools/config_tool.py`, or
+  `tools/config_web.html` in Chrome/Edge): polling rate, audio routing,
+  jack-following audio device, inactivity timeout, wake-on-PS, and more
+
+## Configuring
+
+Two front-ends for the same HID config reports:
+
+- `tools/config_tool.py` -- CLI (`get`, `set name=value ...`, `fields`).
+- `tools/config_web.html` -- a WebHID page for Chrome/Edge. WebHID needs a
+  secure context, so serve it rather than opening the file directly:
+
+  ```sh
+  make serve          # or: make serve PORT=9000
+  # then open http://localhost:8000/tools/config_web.html
+  ```
+
+Both are blocked on **Windows**: the config report IDs 0xF6-0xF9 are handled by
+the firmware but are not declared in the HID report descriptor (which is kept
+byte-identical to a real DS4 v2), and Windows drops GET/SET_FEATURE for any
+undeclared report id. They work on Linux, macOS and ChromeOS as-is.
 
 ## Flashing
 

@@ -26,6 +26,7 @@
 #include "bsp/board_api.h"
 #include "tusb.h"
 #include "config.h"
+#include "usb.h"
 
 #ifndef ENABLE_SERIAL
 #define ENABLE_SERIAL 0
@@ -60,6 +61,16 @@ enum {
 #else
         0,
 #endif
+    // The audio function occupies everything between the configuration header
+    // and the HID interface: the (serial-build only) IAD, the Audio Control
+    // interface with its 71 bytes of class-specific descriptors, and the two
+    // AudioStreaming interfaces at 52 bytes each. It can be dropped at runtime
+    // -- see tud_descriptor_configuration_cb / usb_audio_exposed().
+    CONFIG_DESC_HDR_LEN = 9,
+    CONFIG_DESC_LEN_AUDIO = CONFIG_DESC_LEN_AUDIO_IAD + 9 + 71 + 52 + 52,
+    CONFIG_DESC_LEN_HID = 32, // interface 9 + HID class 9 + 2 endpoints
+    AUDIO_ITF_COUNT = 3,      // control + streaming OUT + streaming IN
+
     CONFIG_DESC_LEN_TOTAL = CONFIG_DESC_LEN_BASE + CONFIG_DESC_LEN_WAKE_KBD
 #if ENABLE_SERIAL
         + TUD_CDC_DESC_LEN
@@ -119,8 +130,10 @@ uint8_t const *tud_descriptor_device_cb(void) {
     desc_device.idProduct = 0x09CC; // DualShock 4 v2 (CUH-ZCT2)
     desc_device.iSerialNumber = get_config().enable_usb_sn ? 0x03 : 0x00;
     // USB 2.1 (so the host requests the BOS / MS OS 2.0 selective-suspend opt-in)
-    // only when wake is enabled; plain USB 2.0 otherwise.
-    desc_device.bcdUSB = get_config().enable_wake ? 0x0210 : 0x0200;
+    // only when wake is enabled AND the audio function is on the bus -- the
+    // opt-in exists to stop the audio function from blocking selective suspend,
+    // and with audio hidden there is nothing for the descriptor to point at.
+    desc_device.bcdUSB = (get_config().enable_wake && usb_audio_exposed()) ? 0x0210 : 0x0200;
     return reinterpret_cast<uint8_t const *>(&desc_device);
 }
 
@@ -435,6 +448,13 @@ uint8_t descriptor_configuration[] = {
 #endif
 };
 
+TU_VERIFY_STATIC(CONFIG_DESC_LEN_BASE == CONFIG_DESC_HDR_LEN + CONFIG_DESC_LEN_AUDIO + CONFIG_DESC_LEN_HID,
+                 "audio/HID block lengths do not add up to the base configuration descriptor");
+
+// Scratch for the audio-less variant of the configuration descriptor, built on
+// demand from descriptor_configuration above.
+static uint8_t descriptor_configuration_no_audio[CONFIG_DESC_LEN_TOTAL - CONFIG_DESC_LEN_AUDIO];
+
 // Invoked when received GET CONFIGURATION DESCRIPTOR
 // Application return pointer to descriptor
 // Descriptor contents must exist long enough for transfer to complete
@@ -467,7 +487,38 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
     descriptor_configuration[2] = (uint8_t) (total & 0xFF);                  // wTotalLength lo
     descriptor_configuration[3] = (uint8_t) (total >> 8);                    // wTotalLength hi
     descriptor_configuration[4] = kbd ? ITF_NUM_TOTAL : (ITF_NUM_TOTAL - 1); // bNumInterfaces
-    return descriptor_configuration;
+    if (usb_audio_exposed()) return descriptor_configuration;
+
+    // Jack empty (audio_follow_jack, see usb.cpp): serve the same descriptor
+    // with the audio function cut out, so the host enumerates a plain gamepad
+    // with no audio device at all.
+    // Cheap guard on the hand-maintained byte offsets above: the byte right
+    // after the audio block must be the HID interface descriptor. If an edit to
+    // descriptor_configuration ever moves that, serve the full descriptor
+    // rather than a malformed one.
+    if (descriptor_configuration[CONFIG_DESC_HDR_LEN + CONFIG_DESC_LEN_AUDIO + 1] != TUSB_DESC_INTERFACE) {
+        printf("[USB] audio block length mismatch -- keeping the audio function\n");
+        return descriptor_configuration;
+    }
+
+    uint8_t *out = descriptor_configuration_no_audio;
+    const uint16_t tail = (uint16_t) (total - CONFIG_DESC_HDR_LEN - CONFIG_DESC_LEN_AUDIO);
+    memcpy(out, descriptor_configuration, CONFIG_DESC_HDR_LEN);
+    memcpy(out + CONFIG_DESC_HDR_LEN,
+           descriptor_configuration + CONFIG_DESC_HDR_LEN + CONFIG_DESC_LEN_AUDIO, tail);
+    const uint16_t no_audio_total = (uint16_t) (CONFIG_DESC_HDR_LEN + tail);
+    out[2] = (uint8_t) (no_audio_total & 0xFF); // wTotalLength lo
+    out[3] = (uint8_t) (no_audio_total >> 8);   // wTotalLength hi
+    out[4] -= AUDIO_ITF_COUNT;                  // bNumInterfaces
+    // Interface numbers must stay a gapless 0..n-1 run, so pull everything that
+    // followed the audio function down by three. Interface and IAD descriptors
+    // both carry the number at offset 2 (bInterfaceNumber / bFirstInterface).
+    for (uint16_t i = CONFIG_DESC_HDR_LEN; i + 2 < no_audio_total && out[i]; i += out[i]) {
+        if (out[i + 1] == TUSB_DESC_INTERFACE || out[i + 1] == TUSB_DESC_INTERFACE_ASSOCIATION) {
+            out[i + 2] -= AUDIO_ITF_COUNT;
+        }
+    }
+    return out;
 }
 
 //--------------------------------------------------------------------+
@@ -877,9 +928,11 @@ uint8_t const desc_bos[] = {
 };
 
 uint8_t const *tud_descriptor_bos_cb(void) {
-    // BOS carries the MS OS 2.0 selective-suspend opt-in, only meaningful for wake.
-    // When wake is off the device is USB 2.0 and the host won't ask -- guard anyway.
-    if (!get_config().enable_wake) return nullptr;
+    // BOS carries the MS OS 2.0 selective-suspend opt-in, only meaningful for wake
+    // and only while the audio function is exposed (its registry property names
+    // interface 0, which is the audio function). When either is off the device is
+    // USB 2.0 and the host won't ask -- guard anyway.
+    if (!get_config().enable_wake || !usb_audio_exposed()) return nullptr;
     return desc_bos;
 }
 
@@ -924,7 +977,7 @@ TU_VERIFY_STATIC(sizeof(desc_ms_os_20) == MS_OS_20_DESC_LEN, "MS OS 2.0 descript
 // platform capability, then issues this vendor request to fetch the
 // descriptor set itself.
 bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t const *request) {
-    if (!get_config().enable_wake) return false;
+    if (!get_config().enable_wake || !usb_audio_exposed()) return false;
     if (stage != CONTROL_STAGE_SETUP) return true;
     if (request->bmRequestType_bit.type != TUSB_REQ_TYPE_VENDOR) return false;
     if (request->bRequest == MS_OS_20_VENDOR_CODE && request->wIndex == 7) {

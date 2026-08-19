@@ -4,11 +4,15 @@
 
 #include <algorithm>
 
+#include "audio.h"
 #include "bt.h"
 #include "tusb.h"
 #include "bsp/board_api.h"
+#include "pico/time.h"
 #include "config.h"
+#include "usb.h"
 #include "utils.h"
+#include "wake.h"
 
 uint8_t mute[2] = {}; // 0: SPEAKER(0x02) 1: MIC(0x05)
 // 0: SPEAKER(0x02) 1: MIC(0x05). Mic seed kept within the advertised
@@ -264,3 +268,86 @@ void tud_suspend_cb(bool remote_wakeup_en) {
 }
 
 #endif
+
+//--------------------------------------------------------------------+
+// Jack-follow audio exposure
+//--------------------------------------------------------------------+
+// A PS4 only offers a headset audio device while something is plugged into the
+// DS4's 3.5 mm jack, and the host switches its default output the moment that
+// device appears. The dongle mirrors that when audio_follow_jack is on (the
+// default): the whole USB audio function is dropped from the configuration
+// descriptor while the jack is empty, and a plug/unplug re-enumerates the
+// device so the host sees the audio endpoint come and go like a real headset.
+//
+// The decision has to be latched per enumeration -- a descriptor request must
+// never see a different answer than the one the host is already enumerating
+// against -- so the live jack state only takes effect at (re)connect time.
+
+namespace {
+
+constexpr uint32_t JACK_DEBOUNCE_MS = 300; // ride out jack contact chatter before re-enumerating
+constexpr uint32_t REENUM_GAP_MS = 150;    // bus-down window the host reads as an unplug (as FUNC_RECONNECT)
+
+bool audio_exposed = true;    // latched for the current enumeration
+uint32_t jack_change_ms = 0;  // first sighting of a not-yet-latched state, 0 = none pending
+uint32_t reconnect_at_ms = 0; // when to bring the bus back up after a hide/show, 0 = idle
+
+// Should the audio function be visible, given the jack and the config right now?
+bool audio_exposure_target() {
+    const Config_body &cfg = get_config();
+    if (!cfg.audio_follow_jack) return true;
+    if (cfg.speaker_select == 1) return true; // pinned to the built-in speaker: the jack is irrelevant
+    return audio_headset_plugged();
+}
+
+} // namespace
+
+bool usb_audio_exposed() {
+    return audio_exposed;
+}
+
+void usb_audio_latch_exposure() {
+    audio_exposed = audio_exposure_target();
+    jack_change_ms = 0;
+}
+
+void usb_audio_exposure_task() {
+    const uint32_t now = to_ms_since_boot(get_absolute_time());
+
+    // Second half of a re-enumeration: bring the bus back up with the new latch.
+    if (reconnect_at_ms) {
+        if (static_cast<int32_t>(now - reconnect_at_ms) < 0) return;
+        reconnect_at_ms = 0;
+        usb_audio_latch_exposure();
+        if (!tud_suspended()) tud_connect();
+        printf("[AUDIO] USB audio device %s\n", audio_exposed ? "exposed" : "hidden");
+        return;
+    }
+
+    if (!get_config().audio_follow_jack) return;
+    // Only while we are actually on the bus and the host is awake: a hidden
+    // dongle (no controller) has nothing to re-enumerate, and a reconnect
+    // during suspend would wake a sleeping host.
+    if (!tud_connected() || tud_suspended()) return;
+
+    const bool target = audio_exposure_target();
+    if (target == audio_exposed) {
+        jack_change_ms = 0;
+        return;
+    }
+    if (!jack_change_ms) {
+        jack_change_ms = now ? now : 1;
+        return;
+    }
+    if (now - jack_change_ms < JACK_DEBOUNCE_MS) return;
+    jack_change_ms = 0;
+
+    printf("[AUDIO] Headset jack %s -- re-enumerating to %s the USB audio device\n",
+           target ? "plugged" : "unplugged", target ? "show" : "hide");
+    wake_note_usb_reconnect(); // this disconnect is deliberate, not a host sleep
+    usb_audio_reset_volume_sync();
+    audio_usb_itf_reset();
+    tud_disconnect();
+    reconnect_at_ms = now + REENUM_GAP_MS;
+    if (!reconnect_at_ms) reconnect_at_ms = 1;
+}

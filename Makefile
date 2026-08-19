@@ -6,10 +6,13 @@ GENERATOR     := Ninja
 
 VERSION := $(shell git describe --tags --exact-match 2>/dev/null || git rev-parse --short=7 HEAD)
 
+PYTHON ?= python3
+PORT   ?= 8000
+
 PRODUCTION_DIR := build/standard
 DEBUG_DIR      := build/serial
 
-.PHONY: all build production debug deploy deploy-debug clean distclean
+.PHONY: all build production debug deploy deploy-debug serve clean distclean
 
 all: build
 
@@ -45,6 +48,14 @@ deploy: production
 deploy-debug: debug
 	-python3 tools/reboot_bootsel.py
 	tools/flash.sh $(DEBUG_DIR)/ds4-bridge.uf2 30
+
+## Serve the WebHID config UI (tools/config_web.html) over http://localhost.
+## WebHID needs a secure context, so the page has to be served -- opening it as
+## a file:// URL leaves navigator.hid undefined. Override the port with
+## `make serve PORT=9000`. Ctrl-C to stop.
+serve:
+	@echo "DS4Dongle config UI: http://localhost:$(PORT)/tools/config_web.html"
+	$(PYTHON) -m http.server $(PORT)
 
 clean:
 	cmake --build $(PRODUCTION_DIR) --target clean 2>/dev/null || true

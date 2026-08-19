@@ -10,6 +10,7 @@
 
 #include "bt.h"
 #include "config.h"
+#include "usb.h"
 #include "device/usbd.h"
 #include "pico/bootrom.h"
 #include "pico/time.h"
@@ -104,6 +105,7 @@ void pico_cmd_set(uint8_t report_id, uint8_t const *buffer, uint16_t bufsize) {
         wake_note_usb_reconnect();   // this disconnect is intentional, not a host sleep
         tud_disconnect();
         sleep_ms(150);
+        usb_audio_latch_exposure();  // pick up a just-changed audio_follow_jack / jack state
         tud_connect();
     }
     if (buffer[0] == 0x04) {

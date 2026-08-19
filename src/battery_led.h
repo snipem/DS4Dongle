@@ -1,6 +1,6 @@
 //
 // Low-battery LED indicator for the Pico onboard LED.
-// Reads PowerPercent / PowerState from interrupt_in_data[52]
+// Reads the battery level / cable state from interrupt_in_data[29]
 // (DS4 battery/ext byte of the input report).
 //
 
@@ -12,7 +12,7 @@ void battery_led_init(void);
 // battery is low and the controller is connected; otherwise no-op.
 void battery_led_tick(void);
 
-// Call from the BT input-report callback whenever a fresh 0x31 report
+// Call from the BT input-report callback whenever a fresh 0x11-layout report
 // has been copied into interrupt_in_data. Used to detect disconnection
 // via stale-report timeout.
 void battery_led_note_report(void);
@@ -22,5 +22,5 @@ void battery_led_note_report(void);
 // (now-stale) battery byte until a fresh report arrives on the next
 // connection. Without this, the LED can stay frozen in whichever state
 // it was at the moment of disconnect, or briefly resume blinking during
-// reconnect retries while interrupt_in_data[52] still reads low.
+// reconnect retries while interrupt_in_data[29] still reads low.
 void battery_led_on_disconnect(void);

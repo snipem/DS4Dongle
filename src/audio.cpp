@@ -116,6 +116,11 @@ void set_mic_active(bool active) {
     ds4_enable_mic(active && get_config().mic_select != 3);
 }
 
+void audio_usb_itf_reset() {
+    spk_active = false;
+    set_mic_active(false);
+}
+
 // BT input report 0x13 (state + mic audio): locate the SBC frame by its
 // syncword and queue it for the core1 decoder. Called from the BT data path.
 void __not_in_flash_func(audio_mic_bt_data)(const uint8_t *data, uint16_t len) {

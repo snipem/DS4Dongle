@@ -97,6 +97,7 @@ FIELDS = [
     ("enable_wake",        "u8",    lambda v: v in (0, 1),       "0/1 (wake host on PS press)"),
     ("_reserved_d",        "res1",  None,                        ""),  # firmware trigger_reduce
     ("lock_volume",        "u8",    lambda v: v in (0, 1),       "0/1 (ignore the volume change from SetStateData(game or software))"),
+    ("audio_follow_jack",  "u8",    lambda v: v in (0, 1),       "0/1 (default 1: show the USB audio device only while a headset is in the jack)"),
 ]
 FIELD_NAMES = [f[0] for f in FIELDS]
 # The DS4 settings the tool actually exposes (reserved padding excluded).

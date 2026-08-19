@@ -25,6 +25,8 @@ struct __attribute__((packed)) Config_body {
     uint8_t enable_wake; // bool: 0 disabled (default), 1 wake host on PS press (USB remote wakeup)
     uint8_t trigger_reduce; // [0,10] (0: auto)
     uint8_t lock_volume; // bool
+    uint8_t audio_follow_jack; // bool: 1 (default) only exposes the USB audio device while a
+                               // headset is plugged into the controller's 3.5 mm jack
 };
 
 struct __attribute__((packed)) Config {

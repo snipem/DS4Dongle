@@ -10,6 +10,7 @@
 #include "button_functions.h"
 #include "utils.h"
 #include "audio.h"
+#include "usb.h"
 #if ENABLE_DEBUG
 #include "debug.h"
 #endif
@@ -379,6 +380,7 @@ int main() {
         tud_task();
         wake_task();
         audio_loop();
+        usb_audio_exposure_task();
 #if ENABLE_DEBUG
         debug_log_core1_stack_usage();
 #endif

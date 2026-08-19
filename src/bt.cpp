@@ -17,6 +17,7 @@
 #include "bsp/board_api.h"
 #include "classic/sdp_server.h"
 #include "config.h"
+#include "usb.h"
 #include "wake.h"
 #include "pico/util/queue.h"
 #if ENABLE_BATT_LED
@@ -683,6 +684,7 @@ static void __not_in_flash_func(l2cap_packet_handler)(uint8_t packet_type, uint1
                     await_first_feature = false;
 #if !ENABLE_SERIAL
                     // don't re-enumerate while the host is suspended -- it would wake a sleeping host
+                    usb_audio_latch_exposure(); // decide now whether this enumeration carries audio
                     if (!tud_suspended()) tud_connect();
 #endif
                 }
