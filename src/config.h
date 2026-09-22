@@ -36,6 +36,30 @@ struct __attribute__((packed)) Config {
     Config_body body;
 };
 
+#if OPINIONATED
+// Wi-Fi Wake-on-LAN settings (opinionated build only). Stored in the config
+// flash page behind Config, with its own magic + CRC so it never forces a
+// Config_body reset, and deliberately NOT part of Config_body: the password
+// would not fit the 62-byte 0xF6 update payload, and it must never be readable
+// back over GET_REPORT 0xF7. Set field-wise via 0xF6 funcid 0x08, read (minus
+// the password) via 0xFA, persisted by the same funcid 0x02 save.
+constexpr uint8_t WOL_SSID_MAX = 32;
+constexpr uint8_t WOL_PASSWORD_MAX = 63; // WPA2 passphrase limit
+
+struct __attribute__((packed)) WolConfig {
+    uint32_t magic;
+    uint32_t crc32;           // over everything after this field
+    uint8_t enabled;          // bool
+    uint8_t mac[6];           // target PC NIC
+    uint8_t ssid_len;
+    char ssid[WOL_SSID_MAX];
+    uint8_t password_len;     // 0: open network
+    char password[WOL_PASSWORD_MAX + 1];
+};
+
+WolConfig& get_wol_config();
+#endif
+
 void config_default();
 void config_load();
 bool config_save();

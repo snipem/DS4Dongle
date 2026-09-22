@@ -35,6 +35,12 @@ jobs:
           - name: waveshare
             artifact: ds4-bridge-waveshare
             cmake_args: "-DWAVESHARE_RP2350B_PLUS_W_BUILD=ON"
+          - name: opinionated
+            artifact: ds4-bridge-opinionated
+            cmake_args: "-DOPINIONATED=ON"
+          - name: waveshare-opinionated
+            artifact: ds4-bridge-waveshare-opinionated
+            cmake_args: "-DWAVESHARE_RP2350B_PLUS_W_BUILD=ON -DOPINIONATED=ON"
 
     steps:
       - name: Checkout
@@ -56,7 +62,12 @@ jobs:
         if: steps.cache-arm-toolchain.outputs.cache-hit != 'true'
         run: |
           mkdir -p "$ARM_TOOLCHAIN_PATH"
-          curl -fsSL "$ARM_TOOLCHAIN_URL" | tar -xJ -C "$ARM_TOOLCHAIN_PATH" --strip-components=1
+          # gitlab.arm.com hands out sporadic 502s when several matrix jobs
+          # fetch at once on a cold cache, so retry, and download to a file
+          # first: piping straight into tar would feed an error page to xz.
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o toolchain.tar.xz "$ARM_TOOLCHAIN_URL"
+          tar -xJf toolchain.tar.xz -C "$ARM_TOOLCHAIN_PATH" --strip-components=1
+          rm -f toolchain.tar.xz
 
       - name: Cache Pico SDK
         id: cache-pico-sdk
@@ -162,6 +173,8 @@ jobs:
             artifacts/ds4-bridge.uf2 \
             artifacts/ds4-bridge-debug.uf2 \
             artifacts/ds4-bridge-waveshare.uf2 \
+            artifacts/ds4-bridge-opinionated.uf2 \
+            artifacts/ds4-bridge-waveshare-opinionated.uf2 \
             tools/config_tool.py \
             --repo "${{ github.repository }}" \
             --title "${{ github.ref_name }}" \
@@ -171,5 +184,7 @@ jobs:
             artifacts/ds4-bridge.uf2 \
             artifacts/ds4-bridge-debug.uf2 \
             artifacts/ds4-bridge-waveshare.uf2 \
+            artifacts/ds4-bridge-opinionated.uf2 \
+            artifacts/ds4-bridge-waveshare-opinionated.uf2 \
             tools/config_tool.py \
             --repo "${{ github.repository }}" --clobber

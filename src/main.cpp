@@ -15,6 +15,7 @@
 #include "debug.h"
 #endif
 #include "wake.h"
+#include "wol.h"
 #ifdef ENABLE_WAKE_HID
 #include "ps_shortcut.h"
 #endif
@@ -276,10 +277,19 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
     (void) report_type;
 
     if (is_pico_cmd(report_id)) {
+        // Copy before anything can printf: `buffer` is TinyUSB's shared control
+        // buffer, and in ENABLE_SERIAL builds printf re-enters tud_task() while
+        // the host has the serial port open. The host's next request (e.g. the
+        // GET_REPORT that reads back a config write) is then processed mid-
+        // callback and its reply overwrites `buffer` -- a 0x08 Wake-on-LAN write
+        // turned into a 0x01 config update carrying the 0xFA reply bytes.
+        uint8_t cmd[CFG_TUD_HID_EP_BUFSIZE];
+        const uint16_t len = bufsize < sizeof(cmd) ? bufsize : sizeof(cmd);
+        memcpy(cmd, buffer, len);
 #if ENABLE_VERBOSE
-        printf("[HID] Receive 0xf6 setting config, funcid:0x%02X\n", buffer[0]);
+        printf("[HID] Receive 0xf6 setting config, funcid:0x%02X\n", cmd[0]);
 #endif
-        pico_cmd_set(report_id, buffer, bufsize);
+        pico_cmd_set(report_id, cmd, len);
         return;
     }
 
@@ -379,6 +389,7 @@ int main() {
         cyw43_arch_poll();
         tud_task();
         wake_task();
+        wol_task();
         audio_loop();
         usb_audio_exposure_task();
 #if ENABLE_DEBUG

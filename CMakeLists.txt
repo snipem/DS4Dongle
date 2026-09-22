@@ -25,6 +25,11 @@ endif ()
 # ====================================================================================
 
 option(PICO_W_BUILD "Build for Rasberry Pi Pico W, audio is missing" OFF)
+# Opinionated variant: trades USB indistinguishability for features. Declares the
+# config reports 0xF6-0xFA in the HID report descriptor (so config_tool.py and
+# config_web.html work on Windows too), defaults to the 1 kHz polling rate, and
+# adds Wi-Fi Wake-on-LAN. The vanilla build (OFF) stays byte-identical to a DS4 v2.
+option(OPINIONATED "Opinionated build: Windows-configurable, 1 kHz default, Wi-Fi Wake-on-LAN" OFF)
 option(WAVESHARE_RP2350B_PLUS_W_BUILD "Build for Waveshare RP2350B-Plus-W (USB-C, 16MB flash, RM2 wireless)" OFF)
 
 if (PICO_W_BUILD AND WAVESHARE_RP2350B_PLUS_W_BUILD)
@@ -260,6 +265,16 @@ target_compile_definitions(ds4-bridge PRIVATE
 # behavior are only presented/run when enabled at runtime (see usb_descriptors.cpp,
 # wake.cpp).
 target_compile_definitions(ds4-bridge PRIVATE ENABLE_WAKE_HID)
+
+if (OPINIONATED)
+        set(OPINIONATED_VALUE 1)
+        target_sources(ds4-bridge PRIVATE src/wol.cpp)
+        set(VERSION_SUFFIX "-opinionated")
+else ()
+        set(OPINIONATED_VALUE 0)
+        set(VERSION_SUFFIX "")
+endif ()
+target_compile_definitions(ds4-bridge PRIVATE OPINIONATED=${OPINIONATED_VALUE})
 target_sources(ds4-bridge PRIVATE
         src/wake.cpp
         src/ps_shortcut.cpp
@@ -275,7 +290,7 @@ endif()
 set(VERSION "dev" CACHE STRING "Program version string")
 
 pico_set_program_name(ds4-bridge "ds4-bridge")
-pico_set_program_version(ds4-bridge "${VERSION}")
+pico_set_program_version(ds4-bridge "${VERSION}${VERSION_SUFFIX}")
 
 # Modify the below lines to enable/disable output over UART/USB
 pico_enable_stdio_uart(ds4-bridge 1)

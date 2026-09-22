@@ -4,7 +4,9 @@
 
 #include "config.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 
 #include "bt.h"
@@ -13,11 +15,28 @@
 #include "hardware/sync.h"
 #include "pico/cyw43_arch.h"
 #include "pico/flash.h"
+#include "pico/btstack_flash_bank.h"
 
 constexpr uint32_t CONFIG_MAGIC = 0x66ccff00;
 constexpr uint16_t CONFIG_VERSION = 6; // 如果想要强制重置配置，再更新 CONFIG_VERSION。
-constexpr uint32_t CONFIG_FLASH_OFFSET = PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE;
+// The sector right below BTstack's pairing storage -- NOT the last sector of
+// flash. picotool appends an RP2350-E10 workaround block at 0x10ffff00 (the top
+// of a 16 MB address space) to every UF2; on the Pico 2 W's 4 MB chip that
+// address wraps onto the last sector, so every UF2 flash erased a config kept
+// there. The SDK keeps the BTstack bank clear of that sector for the same
+// reason (PICO_FLASH_BANK_STORAGE_OFFSET), so sit directly below it.
+constexpr uint32_t CONFIG_FLASH_OFFSET = PICO_FLASH_BANK_STORAGE_OFFSET - FLASH_SECTOR_SIZE;
 static Config config{};
+
+#if OPINIONATED
+constexpr uint32_t WOL_CONFIG_MAGIC = 0x574f4c01; // "WOL" v1
+// WolConfig lives in the same flash page as Config, at a fixed offset so Config
+// can still grow without moving it.
+constexpr uint32_t WOL_CONFIG_PAGE_OFFSET = 128;
+static WolConfig wol_config{};
+static_assert(sizeof(Config) <= WOL_CONFIG_PAGE_OFFSET);
+static_assert(WOL_CONFIG_PAGE_OFFSET + sizeof(WolConfig) <= FLASH_PAGE_SIZE);
+#endif
 
 // 编译期保护
 // 判断Config结构体是否能放进flash 256bytes
@@ -74,10 +93,11 @@ void config_valid() {
         printf("[Config] disable_pico_led is invalid\n");
     }
     if (body->polling_rate_mode > 2) {
-        // Default to stock 250 Hz: a real DS4 v2's HID endpoints advertise
-        // bInterval 5, so faster modes make the dongle distinguishable over
-        // USB. Higher rates stay available as an explicit opt-in.
-        body->polling_rate_mode = 0;
+        // Vanilla defaults to stock 250 Hz: a real DS4 v2's HID endpoints
+        // advertise bInterval 5, so faster modes make the dongle
+        // distinguishable over USB. Higher rates stay available as an explicit
+        // opt-in. The opinionated build defaults to real-time (1 kHz).
+        body->polling_rate_mode = OPINIONATED ? 2 : 0;
         printf("[Config] polling_rate_mode is invalid\n");
     }
     if (body->audio_buffer_length < 16 || body->audio_buffer_length > 128) {
@@ -127,10 +147,45 @@ void config_valid() {
     }
 }
 
+#if OPINIONATED
+static uint32_t calc_wol_crc(const WolConfig &w) {
+    const auto *p = reinterpret_cast<const uint8_t *>(&w);
+    constexpr size_t skip = offsetof(WolConfig, crc32) + sizeof(w.crc32);
+    return crc32(p + skip, sizeof(WolConfig) - skip);
+}
+
+// Blank and disabled: Wake-on-LAN is configured from config_web.html /
+// config_tool.py.
+static void wol_config_default() {
+    memset(&wol_config, 0, sizeof(wol_config));
+    wol_config.magic = WOL_CONFIG_MAGIC;
+}
+
+static void wol_config_load() {
+    memcpy(&wol_config, reinterpret_cast<const uint8_t *>(flash_config()) + WOL_CONFIG_PAGE_OFFSET,
+           sizeof(wol_config));
+    if (wol_config.magic != WOL_CONFIG_MAGIC || wol_config.crc32 != calc_wol_crc(wol_config)) {
+        printf("[Config] No valid Wake-on-LAN config in flash, using defaults\n");
+        wol_config_default();
+    }
+    wol_config.enabled = wol_config.enabled ? 1 : 0;
+    wol_config.ssid_len = std::min(wol_config.ssid_len, WOL_SSID_MAX);
+    wol_config.password_len = std::min(wol_config.password_len, WOL_PASSWORD_MAX);
+    wol_config.password[wol_config.password_len] = 0;
+}
+
+WolConfig& get_wol_config() {
+    return wol_config;
+}
+#endif
+
 void config_load() {
     memcpy(&config, flash_config(), sizeof(Config));
 
     config_valid();
+#if OPINIONATED
+    wol_config_load();
+#endif
 }
 
 // Runs with core1 parked (flash_safe_execute) and core0 interrupts disabled, so
@@ -149,6 +204,11 @@ bool config_save() {
     alignas(4) uint8_t page[FLASH_PAGE_SIZE];
     memset(page, 0xff, sizeof(page));
     memcpy(page, &config, sizeof(Config));
+#if OPINIONATED
+    wol_config.magic = WOL_CONFIG_MAGIC;
+    wol_config.crc32 = calc_wol_crc(wol_config);
+    memcpy(page + WOL_CONFIG_PAGE_OFFSET, &wol_config, sizeof(WolConfig));
+#endif
 
     const int rc = flash_safe_execute(config_save_flash_op, page, 1000);
     if (rc != PICO_OK) {
