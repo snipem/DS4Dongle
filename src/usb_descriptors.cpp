@@ -393,7 +393,11 @@ uint8_t descriptor_configuration[] = {
     0x00, // bCountryCode: Not localized
     0x01, // bNumDescriptors: 1 report descriptor
     0x22, // bDescriptorType: Report
+#if OPINIONATED
+    0x23, 0x02, // wDescriptorLength: 547 (DS4 v2's 507 + the declared config reports)
+#else
     0xFB, 0x01, // wDescriptorLength: 507 (the real DS4 v2's report descriptor)
+#endif
 
     // Endpoint Descriptor (HID IN: EP4)
     0x07, // bLength
@@ -779,9 +783,19 @@ uint8_t const desc_hid_report_ds4[] = {
       0x09, 0x55,             // Usage (0x55)
       0x95, 0x3F,             // Report Count (63)
       0xB1, 0x02,             // Feature (Data,Var)
+#if OPINIONATED
+      // DS4Dongle config reports (src/cmd.cpp). Windows drops GET/SET_FEATURE
+      // for undeclared report ids, so the opinionated build declares them --
+      // which makes it distinguishable from a real DS4 v2. Vanilla omits them.
+      0x85, 0xF6, 0x09, 0x55, 0x95, 0x3F, 0xB1, 0x02, // 0xF6 config set / commands
+      0x85, 0xF7, 0x09, 0x55, 0x95, 0x3F, 0xB1, 0x02, // 0xF7 config get
+      0x85, 0xF8, 0x09, 0x55, 0x95, 0x3F, 0xB1, 0x02, // 0xF8 firmware version
+      0x85, 0xF9, 0x09, 0x55, 0x95, 0x3F, 0xB1, 0x02, // 0xF9 status (RSSI, audio)
+      0x85, 0xFA, 0x09, 0x55, 0x95, 0x3F, 0xB1, 0x02, // 0xFA Wake-on-LAN config/status
+#endif
     0xC0,                   // End Collection
 };
-static_assert(sizeof(desc_hid_report_ds4) == 507);
+static_assert(sizeof(desc_hid_report_ds4) == (OPINIONATED ? 547 : 507));
 
 #ifdef ENABLE_WAKE_HID
 // 41-byte boot-keyboard report descriptor (modifier byte + reserved + 6 keycodes,

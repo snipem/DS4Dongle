@@ -10,31 +10,41 @@ Protocol (see src/cmd.cpp / src/config.h):
       funcid 0x01 + body   -> update config in RAM (firmware clamps invalid values)
       funcid 0x02          -> persist config to flash
       funcid 0x03          -> reconnect the USB device
+      funcid 0x08 + field  -> (opinionated) set a Wake-on-LAN field
+      funcid 0x09          -> (opinionated) Wake-on-LAN test burst
+  GET feature report 0xFA -> (opinionated) Wake-on-LAN config + status
 
 Config_body is a packed struct; this tool derives the binary layout from FIELDS.
 
-PLATFORM NOTE (Windows): the config report IDs 0xF6-0xF9 are handled by the
-firmware but are deliberately NOT declared in the DS4 HID report descriptor
-(it is kept byte-identical to a real DS4 v2, whose feature reports stop at 0xF2).
-Windows' HID class driver rejects GET/SET_FEATURE for any report ID absent from
-the descriptor, so this tool cannot reach the config on Windows with stock
-firmware -- every command fails with "read error". It works on Linux, where
-hidraw passes the raw request through regardless of the descriptor. See
-open_device()/read_config() for the diagnostic. To use it on Windows the
-firmware must declare 0xF6-0xF9 as HID feature reports (and be reflashed).
+FIRMWARE VARIANTS:
+  vanilla     (ds4-bridge.uf2) USB-identical to a real DS4 v2. The config report
+              IDs 0xF6-0xF9 are handled but deliberately NOT declared in the HID
+              report descriptor, and Windows' HID class driver rejects
+              GET/SET_FEATURE for any undeclared report ID -- so on Windows
+              every command fails with "read error". Works on Linux (hidraw
+              passes the raw request through regardless of the descriptor).
+  opinionated (ds4-bridge-opinionated.uf2) declares 0xF6-0xFA, so this tool
+              works on Windows too, and adds Wi-Fi Wake-on-LAN (wol_* fields).
 
 Requires: pip install hidapi
 
-Examples (Linux):
+Examples:
   python config_tool.py get
   python config_tool.py set speaker_volume=90 enable_wake=1
   python config_tool.py set inactive_time=10 --no-save
   python config_tool.py fields
+
+Wake-on-LAN (opinionated firmware):
+  python config_tool.py set wol_ssid=MyWifi wol_password=- wol_mac=aa:bb:cc:dd:ee:ff wol_enabled=1
+  python config_tool.py wol-test
+  (wol_password=- prompts for the password instead of leaving it in shell history)
 """
 import platform
 import argparse
+import getpass
 import struct
 import sys
+import time
 
 
 def _load_hid():
@@ -55,10 +65,13 @@ HID_USAGE_GAMEPAD = 0x05
 REPORT_SET = 0xF6        # SET_REPORT: write/save config
 REPORT_GET_CONFIG = 0xF7  # GET_REPORT: read Config_body
 REPORT_GET_VERSION = 0xF8  # GET_REPORT: firmware version string
+REPORT_GET_WOL = 0xFA    # GET_REPORT: (opinionated) Wake-on-LAN config + status
 
 FUNC_UPDATE = 0x01       # update config in RAM
 FUNC_SAVE = 0x02         # persist to flash
 FUNC_RECONNECT = 0x03    # reconnect tinyusb device
+FUNC_WOL_SET = 0x08      # (opinionated) set a Wake-on-LAN field
+FUNC_WOL_TEST = 0x09     # (opinionated) join Wi-Fi + short magic-packet burst
 
 SET_DATA_LEN = 63        # data bytes after the report id (descriptor report count 0x3F)
 FEATURE_REPORT_LEN = SET_DATA_LEN + 1  # report id + descriptor report count
@@ -110,6 +123,27 @@ BODY_SIZE = struct.calcsize(STRUCT_FMT)
 RESERVED_BYTES = sum(struct.calcsize(KIND_TO_CODE[f[1]])
                      for f in FIELDS if f[1] in RESERVED_KINDS)
 
+# Wake-on-LAN settings (opinionated firmware, src/wol.cpp). Not part of
+# Config_body: set field-wise via funcid 0x08, read via 0xFA. The password is
+# write-only -- the firmware only reports its length.
+WOL_FIELD_ENABLED, WOL_FIELD_MAC, WOL_FIELD_SSID, WOL_FIELD_PASSWORD = range(4)
+WOL_SSID_MAX = 32
+WOL_PASSWORD_MAX = 63
+WOL_CHUNK = SET_DATA_LEN - 4  # after [funcid][field][offset][len]
+WOL_FIELDS = [
+    ("wol_enabled",  "0/1 (Wi-Fi Wake-on-LAN when the controller connects and the PC is not up)"),
+    ("wol_ssid",     f"Wi-Fi network name, 2.4 GHz (max {WOL_SSID_MAX} bytes)"),
+    ("wol_password", f"WPA2 password (8..{WOL_PASSWORD_MAX}, empty = open network; write-only, '-' prompts)"),
+    ("wol_mac",      "MAC address of the PC's network card, aa:bb:cc:dd:ee:ff"),
+]
+WOL_NAMES = {f[0] for f in WOL_FIELDS}
+WOL_STATES = ["idle (Wi-Fi off)", "joining Wi-Fi",
+              "sending magic packets", "retrying Wi-Fi join"]
+WOL_RESULTS = ["-", "stopped: PC is up (USB data connection)", "gave up: timeout",
+               "test finished", "not configured / disabled",
+               "Wi-Fi chip stopped responding -- dongle reboots to recover"]
+WOL_LINK = {0: "down", 1: "joined", -1: "join failed", -2: "SSID not found", -3: "auth failed (wrong password, or WPA handshake timed out -- retried)"}
+
 
 def is_gamepad_hid(devinfo):
     return (devinfo.get("usage_page") == HID_USAGE_PAGE_GENERIC_DESKTOP and
@@ -154,18 +188,18 @@ def open_device():
 
 
 def _feature_read_help(report_id):
-    # The config report IDs (0xF6-0xF9) are handled by the firmware but are not
-    # declared in the DS4 HID report descriptor. Windows' HID class driver
+    # The vanilla firmware handles the config report IDs (0xF6-0xF9) but does not
+    # declare them in the DS4 HID report descriptor. Windows' HID class driver
     # rejects GET/SET_FEATURE for undeclared report IDs, which surfaces here as a
     # bare "read error". Give the user the real reason instead.
     msg = (f"Failed reading config report 0x{report_id:02X}.")
     if platform.system() == "Windows":
-        msg += ("\n\nThis is expected on Windows: report IDs 0x{:02X}-0x{:02X} are not "
-                "declared in the DS4 HID\nreport descriptor (kept byte-identical to a real "
-                "DS4 v2), and Windows blocks\nGET/SET_FEATURE for any undeclared report ID. "
-                "The DS4Dongle config tool only\nworks on Linux (hidraw passes the raw request "
-                "through) unless the firmware is\nchanged to declare these reports as HID "
-                "feature reports.").format(REPORT_SET, REPORT_GET_VERSION)
+        msg += ("\n\nThis is expected on Windows with the vanilla firmware: report IDs "
+                "0x{:02X}-0x{:02X} are not\ndeclared in its HID report descriptor (kept "
+                "byte-identical to a real DS4 v2), and\nWindows blocks GET/SET_FEATURE for "
+                "any undeclared report ID. Flash the opinionated\nfirmware "
+                "(ds4-bridge-opinionated.uf2), which declares them, or configure from "
+                "Linux.").format(REPORT_SET, REPORT_GET_VERSION)
     return msg
 
 
@@ -193,15 +227,91 @@ def read_version(dev):
     raw = bytes(data[1:]) if data and data[0] == REPORT_GET_VERSION else bytes(data or b"")
     return raw.split(b"\x00", 1)[0].decode("ascii", "replace").strip()
 
+
+def read_wol(dev):
+    """Wake-on-LAN config + status (0xFA, layout in src/wol.cpp), or None on
+    firmware without it (vanilla stalls the request)."""
+    try:
+        data = dev.get_feature_report(REPORT_GET_WOL, FEATURE_REPORT_LEN)
+    except OSError:
+        return None
+    raw = bytes(data[1:]) if data and data[0] == REPORT_GET_WOL else bytes(data or b"")
+    if len(raw) < 48 or raw[0] != 1:
+        return None
+    return {
+        "wol_enabled": raw[1],
+        "wol_mac": ":".join(f"{b:02x}" for b in raw[2:8]),
+        "wol_ssid": raw[9:9 + min(raw[8], WOL_SSID_MAX)].decode("utf-8", "replace"),
+        "wol_password": f"<set, {raw[41]} chars>" if raw[41] else "<none: open network>",
+        "state": raw[42],
+        "link": raw[43] - 256 if raw[43] > 127 else raw[43],
+        "result": raw[44],
+        "packets": raw[45] | raw[46] << 8,
+        "joins": raw[47],
+    }
+
+
+def send_set(dev, funcid, payload=b""):
+    # [report id][funcid][payload...] padded to SET_DATA_LEN data bytes.
+    data = (bytes([funcid]) + payload)[:SET_DATA_LEN].ljust(SET_DATA_LEN, b"\x00")
+    dev.send_feature_report(bytes([REPORT_SET]) + data)
+
+
 def write_config(dev, cfg, save):
     body = struct.pack(STRUCT_FMT, *[cfg[name] for name in FIELD_NAMES])
-    # [report id][funcid 0x01][body...] padded to SET_DATA_LEN data bytes.
-    data = bytes([FUNC_UPDATE]) + body
-    data = data[:SET_DATA_LEN].ljust(SET_DATA_LEN, b"\x00")
-    dev.send_feature_report(bytes([REPORT_SET]) + data)
+    send_set(dev, FUNC_UPDATE, body)
     if save:
-        save_data = bytes([FUNC_SAVE]).ljust(SET_DATA_LEN, b"\x00")
-        dev.send_feature_report(bytes([REPORT_SET]) + save_data)
+        send_set(dev, FUNC_SAVE)
+
+
+def write_wol_field(dev, field, value):
+    # [field][offset][len][data...]; strings go in chunks, offset 0 starts a new
+    # value and a zero-length chunk at offset 0 clears it.
+    offset = 0
+    while True:
+        chunk = value[offset:offset + WOL_CHUNK]
+        send_set(dev, FUNC_WOL_SET, bytes([field, offset, len(chunk)]) + chunk)
+        offset += len(chunk)
+        if offset >= len(value):
+            break
+
+
+def parse_mac(text):
+    if ":" in text or "-" in text:
+        parts = text.replace("-", ":").split(":")
+    else:
+        parts = [text[i:i + 2] for i in range(0, len(text), 2)]
+    try:
+        mac = bytes(int(p, 16) for p in parts if len(p) == 2)
+    except ValueError:
+        mac = b""
+    if len(mac) != 6 or len(parts) != 6:
+        sys.exit(f"Bad MAC address '{text}', expected aa:bb:cc:dd:ee:ff.")
+    return mac
+
+
+def parse_wol_assignment(name, raw):
+    """-> (field id, value bytes)"""
+    if name == "wol_enabled":
+        if raw not in ("0", "1"):
+            sys.exit("wol_enabled must be 0 or 1.")
+        return WOL_FIELD_ENABLED, bytes([int(raw)])
+    if name == "wol_mac":
+        return WOL_FIELD_MAC, parse_mac(raw)
+    if name == "wol_ssid":
+        value = raw.encode("utf-8")
+        if not 1 <= len(value) <= WOL_SSID_MAX:
+            sys.exit(f"wol_ssid must be 1..{WOL_SSID_MAX} bytes.")
+        return WOL_FIELD_SSID, value
+    if name == "wol_password":
+        if raw == "-":
+            raw = getpass.getpass("Wi-Fi password (empty = open network): ")
+        value = raw.encode("utf-8")
+        if value and not 8 <= len(value) <= WOL_PASSWORD_MAX:
+            sys.exit(f"wol_password must be 8..{WOL_PASSWORD_MAX} bytes (WPA2), "
+                     "or empty for an open network.")
+        return WOL_FIELD_PASSWORD, value
+    raise AssertionError(name)
 
 
 def fmt_value(name, value):
@@ -212,6 +322,21 @@ def print_config(cfg):
     width = max(len(f[0]) for f in VISIBLE_FIELDS)
     for name, _kind, _ok, helptext in VISIBLE_FIELDS:
         print(f"  {name:<{width}} = {fmt_value(name, cfg[name]):<8}  # {helptext}")
+
+
+def print_wol(wol):
+    width = max(len(f[0]) for f in VISIBLE_FIELDS)
+    for name, helptext in WOL_FIELDS:
+        print(f"  {name:<{width}} = {wol[name]!s:<8}  # {helptext}")
+
+
+def print_wol_status(wol):
+    def lookup(table, key):
+        return table[key] if key < len(table) else key
+    print(f"  status: {lookup(WOL_STATES, wol['state'])}; "
+          f"Wi-Fi {WOL_LINK.get(wol['link'], wol['link'])}; "
+          f"{wol['packets']} magic packets, {wol['joins']} join attempts; "
+          f"last result: {lookup(WOL_RESULTS, wol['result'])}")
 
 
 def parse_assignment(token):
@@ -241,6 +366,9 @@ def cmd_fields(_args):
     for name, kind, _ok, helptext in VISIBLE_FIELDS:
         ro = " (read-only)" if name == "config_version" else ""
         print(f"  {name:<{width}} {kind:<6} {helptext}{ro}")
+    print("\nWake-on-LAN (opinionated firmware only, stored separately from Config_body):")
+    for name, helptext in WOL_FIELDS:
+        print(f"  {name:<{width}} {'str':<6} {helptext}")
     if RESERVED_BYTES:
         print(f"\n({RESERVED_BYTES} bytes are reserved for firmware settings the DS4 "
               f"does not use;\n they are kept in the {BODY_SIZE}-byte layout but not "
@@ -252,29 +380,56 @@ def cmd_get(_args):
     try:
         version = read_version(dev)
         cfg = read_config(dev)
+        wol = read_wol(dev)
     finally:
         dev.close()
     if version:
         print(f"Firmware: {version}")
     print("Config:")
     print_config(cfg)
+    if wol is not None:
+        print("Wake-on-LAN:")
+        print_wol(wol)
+        print_wol_status(wol)
 
 
 def cmd_set(args):
-    updates = dict(parse_assignment(t) for t in args.assignments)
-    if not updates:
+    updates = {}
+    wol_updates = []  # (name, field id, value bytes)
+    for token in args.assignments:
+        name, _, raw = token.partition("=")
+        if name.strip() in WOL_NAMES and _:
+            wol_updates.append((name.strip(),) + parse_wol_assignment(name.strip(), raw))
+        else:
+            key, value = parse_assignment(token)
+            updates[key] = value
+    if not updates and not wol_updates:
         sys.exit("Nothing to set. Pass one or more name=value pairs.")
     dev = open_device()
     try:
         cfg = read_config(dev)
+        if wol_updates and read_wol(dev) is None:
+            sys.exit("This firmware has no Wake-on-LAN -- the wol_* fields need the "
+                     "opinionated build (ds4-bridge-opinionated.uf2).")
+        # Wake-on-LAN fields first, so the save below persists them together
+        # with Config_body (one flash page).
+        for _name, field, value in wol_updates:
+            write_wol_field(dev, field, value)
         cfg.update(updates)
         write_config(dev, cfg, save=not args.no_save)
         new_cfg = read_config(dev)
+        new_wol = read_wol(dev) if wol_updates else None
     finally:
         dev.close()
     print("Updated:" + ("" if args.no_save else " (saved to flash)"))
     for name in updates:
         print(f"  {name} -> {fmt_value(name, new_cfg[name])}")
+    for name, _field, _value in wol_updates:
+        print(f"  {name} -> {new_wol[name]}")
+    if new_wol and new_wol["wol_enabled"] and (
+            not new_wol["wol_ssid"] or new_wol["wol_mac"] == "00:00:00:00:00:00"):
+        print("  note: Wake-on-LAN is enabled but has no wol_ssid / wol_mac yet -- it stays "
+              "inactive until both are set.")
     # Firmware clamps invalid values; surface any that were adjusted.
     for name, want in updates.items():
         got = new_cfg[name]
@@ -283,8 +438,46 @@ def cmd_set(args):
             print(f"  note: {name} was clamped by firmware to {fmt_value(name, got)}")
 
 
+def cmd_wol_test(_args):
+    dev = open_device()
+    try:
+        wol = read_wol(dev)
+        if wol is None:
+            sys.exit("This firmware has no Wake-on-LAN (flash ds4-bridge-opinionated.uf2).")
+        if not wol["wol_ssid"] or wol["wol_mac"] == "00:00:00:00:00:00":
+            sys.exit("Wake-on-LAN is not configured: set wol_ssid (and wol_password, wol_mac) "
+                     "first, e.g.\n  python config_tool.py set \"wol_ssid=MyWifi\" wol_password=-")
+        print(f"Wake-on-LAN test: joining '{wol['wol_ssid']}' and sending magic packets "
+              f"to {wol['wol_mac']} ...")
+        send_set(dev, FUNC_WOL_TEST)
+        time.sleep(0.5)
+        deadline = time.time() + 35
+        last = None
+        while time.time() < deadline:
+            fresh = read_wol(dev)
+            if fresh is None:
+                sys.exit("The dongle stopped answering the status read (0xFA) mid-test. "
+                         f"Last status: {wol['packets']} magic packets sent.")
+            wol = fresh
+            snapshot = (wol["state"], wol["link"], wol["packets"], wol["result"])
+            if snapshot != last:
+                print_wol_status(wol)
+                last = snapshot
+            if wol["state"] == 0 and wol["result"] != 0:
+                break
+            time.sleep(0.5)
+    finally:
+        dev.close()
+    if wol["packets"]:
+        print("OK: joined Wi-Fi and sent magic packets. A running PC ignores them; to see them "
+              "arrive,\ncapture on the PC (Wireshark display filter: wol).")
+    else:
+        print("No magic packets were sent -- check wol_ssid / wol_password; the network must be "
+              "2.4 GHz WPA2 (or open).")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Read and modify ds5dongle config over USB HID.")
+    parser = argparse.ArgumentParser(description="Read and modify DS4Dongle config over USB HID.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("get", help="read and print the current config").set_defaults(func=cmd_get)
@@ -295,6 +488,9 @@ def main():
     p_set.add_argument("--no-save", action="store_true",
                        help="update RAM only; do not persist to flash")
     p_set.set_defaults(func=cmd_set)
+
+    sub.add_parser("wol-test", help="(opinionated) join Wi-Fi now and send a few magic packets"
+                   ).set_defaults(func=cmd_wol_test)
 
     args = parser.parse_args()
     args.func(args)

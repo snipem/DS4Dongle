@@ -42,6 +42,9 @@ See [Releases](https://github.com/snipem/DS4Dongle/releases) for the images.
 - Configurable over HID feature reports (`tools/config_tool.py`, or
   `tools/config_web.html` in Chrome/Edge): polling rate, audio routing,
   jack-following audio device, inactivity timeout, wake-on-PS, and more
+- Opinionated variant: configurable on Windows, 1 kHz by default, and Wi-Fi
+  Wake-on-LAN to power the PC on with the PS button (see
+  [Firmware variants](#firmware-variants))
 
 ## Configuring
 
@@ -56,10 +59,63 @@ Two front-ends for the same HID config reports:
   # then open http://localhost:8000/tools/config_web.html
   ```
 
-Both are blocked on **Windows**: the config report IDs 0xF6-0xF9 are handled by
-the firmware but are not declared in the HID report descriptor (which is kept
-byte-identical to a real DS4 v2), and Windows drops GET/SET_FEATURE for any
-undeclared report id. They work on Linux, macOS and ChromeOS as-is.
+With the **vanilla** firmware both are blocked on **Windows**: the config report
+IDs 0xF6-0xF9 are handled by the firmware but are not declared in the HID report
+descriptor (which is kept byte-identical to a real DS4 v2), and Windows drops
+GET/SET_FEATURE for any undeclared report id. They work on Linux, macOS and
+ChromeOS as-is. The **opinionated** firmware declares the reports, so both tools
+work on Windows too (see [Firmware variants](#firmware-variants)).
+
+## Firmware variants
+
+| | `ds4-bridge.uf2` (vanilla) | `ds4-bridge-opinionated.uf2` |
+|---|---|---|
+| USB persona | byte-identical to a real DS4 v2 | DS4 v2 + declared config reports 0xF6-0xFA (distinguishable) |
+| Config tools on Windows | no | yes |
+| Default polling rate | 250 Hz (stock) | real-time / 1 kHz |
+| Wi-Fi Wake-on-LAN | no | yes |
+
+Waveshare RP2350B-Plus-W builds: `ds4-bridge-waveshare.uf2` (vanilla) and
+`ds4-bridge-waveshare-opinionated.uf2`.
+
+The default polling rate only applies to a fresh config; a dongle that already
+has a saved config keeps its `polling_rate_mode` when you switch variants.
+
+### Wi-Fi Wake-on-LAN (opinionated)
+
+Wakes a PC that is off, hibernating, or asleep without USB remote wakeup:
+
+1. You press PS; the controller connects to the dongle.
+2. If there is no USB data connection at that moment (the PC has not
+   enumerated the dongle, or the bus is suspended), the dongle immediately joins
+   the configured Wi-Fi network and broadcasts a magic packet for the PC's
+   network card every second (raw EtherType 0x0842 frame plus a UDP broadcast
+   to port 9). If the PC turns out to be on, it enumerates the dongle before the
+   Wi-Fi join finishes and Wi-Fi is switched off again without sending anything.
+3. It stops the moment the PC enumerates the dongle, or after 5 minutes.
+
+Wi-Fi is fully off (disassociated, WLAN core down) whenever the PC is up, so
+Bluetooth has the radio to itself during play. Only a *fresh* controller
+connection arms it, so shutting the PC down with the controller still on does
+not wake it back up.
+
+Configure it in `config_web.html` (Wake-on-LAN section, with a **Test** button)
+or with the CLI:
+
+```sh
+python tools/config_tool.py set wol_ssid=MyWifi wol_password=- wol_mac=aa:bb:cc:dd:ee:ff wol_enabled=1
+python tools/config_tool.py wol-test   # join now + send 5 packets, shows the result
+```
+
+The password is write-only (the firmware never reports it back) but is stored
+unencrypted in the dongle's flash. Requirements:
+
+- A **2.4 GHz** network with WPA2-PSK or open (the Pico's radio has no 5 GHz;
+  WPA3-only networks will not work).
+- The USB port must stay **powered while the PC is off** (often "ErP" off /
+  "USB power in S4/S5" on in the BIOS). With no power the dongle can't do anything.
+- Wake-on-LAN (magic packet) enabled in the BIOS and on the NIC in Windows,
+  and the PC wired to the same LAN/broadcast domain as the Wi-Fi.
 
 ## Flashing
 
@@ -99,7 +155,8 @@ cmake --build build
 # → build/ds4-bridge.uf2
 ```
 
-`-DENABLE_SERIAL=ON -DENABLE_VERBOSE=ON` builds the debug variant.
+`-DENABLE_SERIAL=ON -DENABLE_VERBOSE=ON` builds the debug variant;
+`-DOPINIONATED=ON` (or `make opinionated`) builds the opinionated variant.
 
 ## Debugging
 

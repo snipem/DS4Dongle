@@ -35,6 +35,12 @@ jobs:
           - name: waveshare
             artifact: ds4-bridge-waveshare
             cmake_args: "-DWAVESHARE_RP2350B_PLUS_W_BUILD=ON"
+          - name: opinionated
+            artifact: ds4-bridge-opinionated
+            cmake_args: "-DOPINIONATED=ON"
+          - name: waveshare-opinionated
+            artifact: ds4-bridge-waveshare-opinionated
+            cmake_args: "-DWAVESHARE_RP2350B_PLUS_W_BUILD=ON -DOPINIONATED=ON"
 
     steps:
       - name: Checkout
@@ -162,6 +168,8 @@ jobs:
             artifacts/ds4-bridge.uf2 \
             artifacts/ds4-bridge-debug.uf2 \
             artifacts/ds4-bridge-waveshare.uf2 \
+            artifacts/ds4-bridge-opinionated.uf2 \
+            artifacts/ds4-bridge-waveshare-opinionated.uf2 \
             tools/config_tool.py \
             --repo "${{ github.repository }}" \
             --title "${{ github.ref_name }}" \
@@ -171,5 +179,7 @@ jobs:
             artifacts/ds4-bridge.uf2 \
             artifacts/ds4-bridge-debug.uf2 \
             artifacts/ds4-bridge-waveshare.uf2 \
+            artifacts/ds4-bridge-opinionated.uf2 \
+            artifacts/ds4-bridge-waveshare-opinionated.uf2 \
             tools/config_tool.py \
             --repo "${{ github.repository }}" --clobber

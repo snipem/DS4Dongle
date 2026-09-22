@@ -117,6 +117,12 @@ void bt_send_control(uint8_t *data, uint16_t len) {
     }
 }
 
+// Controller fully up: HID interrupt channel open and the first feature report
+// answered -- the same point at which the USB device is presented to the host.
+bool bt_is_connected() {
+    return hid_interrupt_cid != 0 && !await_first_feature;
+}
+
 bool bt_disconnect() {
     if (acl_handle == HCI_CON_HANDLE_INVALID) {
         return false;

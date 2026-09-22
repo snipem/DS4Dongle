@@ -24,6 +24,25 @@ not available on file:// URLs. From the repo root:
 
 <form id="form"></form>
 
+<div id="wol" hidden>
+<h2>Wi-Fi Wake-on-LAN</h2>
+<p>
+When the controller connects (PS press) and the PC has not enumerated the
+dongle, the dongle immediately joins this 2.4 GHz network and broadcasts magic
+packets for the PC's network card until the PC comes up (5 min max). Wi-Fi is
+off at all other times. Saved together with the settings above.
+</p>
+<form id="wolform">
+<label for="wol_enabled">wol_enabled </label><input type="checkbox" id="wol_enabled"><br>
+<label for="wol_ssid">wol_ssid </label><input type="text" id="wol_ssid" maxlength="32"><br>
+<label for="wol_password">wol_password </label><input type="password" id="wol_password" maxlength="63" autocomplete="new-password">
+<small id="wol_pw_state"></small><br>
+<label for="wol_open">open network (no password) </label><input type="checkbox" id="wol_open"><br>
+<label for="wol_mac">wol_mac </label><input type="text" id="wol_mac" placeholder="aa:bb:cc:dd:ee:ff"><small>  the PC's network card</small><br>
+</form>
+<p><button id="woltest" disabled>Test Wake-on-LAN now</button> <span id="wol_status"></span></p>
+</div>
+
 <h2>Log</h2>
 <pre id="log"></pre>
 
@@ -36,7 +55,17 @@ const REPORT_SET = 0xF6;          // SET_FEATURE: [funcid][payload...]
 const REPORT_GET_CONFIG = 0xF7;   // GET_FEATURE: raw Config_body
 const REPORT_GET_VERSION = 0xF8;  // GET_FEATURE: firmware version string
 const REPORT_GET_STATUS = 0xF9;   // GET_FEATURE: [rssi][audio flags]
+const REPORT_GET_WOL = 0xFA;      // GET_FEATURE: (opinionated) Wake-on-LAN config + status
 const FUNC_UPDATE = 0x01, FUNC_SAVE = 0x02, FUNC_RECONNECT = 0x03;
+const FUNC_WOL_SET = 0x08, FUNC_WOL_TEST = 0x09; // (opinionated)
+const WOL_FIELD_ENABLED = 0, WOL_FIELD_MAC = 1, WOL_FIELD_SSID = 2, WOL_FIELD_PASSWORD = 3;
+const WOL_STATES = ["idle (Wi-Fi off)", "joining Wi-Fi",
+                    "sending magic packets", "retrying Wi-Fi join"];
+const WOL_RESULTS = ["-", "stopped: PC is up", "gave up: timeout", "test finished",
+                     "not configured / disabled",
+                     "Wi-Fi chip stopped responding -- dongle reboots to recover"];
+const WOL_LINK = {"0": "down", "1": "joined", "-1": "join failed", "-2": "SSID not found",
+                  "-3": "auth failed (wrong password, or WPA handshake timed out -- retried)"};
 const SET_DATA_LEN = 63;          // data bytes after the report id
 const CONFIG_VERSION = 6;         // src/config.cpp CONFIG_VERSION (display only)
 
@@ -176,6 +205,108 @@ async function sendSet(funcid, payload) {
   await device.sendFeatureReport(REPORT_SET, data);
 }
 
+// --- Wake-on-LAN (opinionated firmware; layout in src/wol.cpp) -------------
+let wolAvailable = false;
+
+async function readWol() {
+  let raw;
+  try {
+    const v = await device.receiveFeatureReport(REPORT_GET_WOL);
+    raw = stripReportId(v, REPORT_GET_WOL, 48);
+  } catch (e) {
+    raw = null; // vanilla firmware stalls 0xFA
+  }
+  wolAvailable = !!raw && raw.length >= 48 && raw[0] === 1;
+  document.getElementById("wol").hidden = !wolAvailable;
+  if (!wolAvailable) return null;
+  const link = raw[43] > 127 ? raw[43] - 256 : raw[43];
+  return {
+    enabled: raw[1],
+    mac: Array.from(raw.subarray(2, 8)).map(function (b) {
+      return b.toString(16).padStart(2, "0");
+    }).join(":"),
+    ssid: new TextDecoder().decode(raw.subarray(9, 9 + Math.min(raw[8], 32))),
+    passwordLen: raw[41],
+    state: raw[42], link: link, result: raw[44],
+    packets: raw[45] | (raw[46] << 8), joins: raw[47],
+  };
+}
+
+function wolStatusText(w) {
+  return "status: " + (WOL_STATES[w.state] || w.state) +
+         "; Wi-Fi " + (WOL_LINK[String(w.link)] || w.link) +
+         "; " + w.packets + " magic packets, " + w.joins + " join attempts" +
+         "; last result: " + (WOL_RESULTS[w.result] || w.result);
+}
+
+function wolFormFrom(w) {
+  document.getElementById("wol_enabled").checked = !!w.enabled;
+  document.getElementById("wol_ssid").value = w.ssid;
+  document.getElementById("wol_mac").value = w.mac;
+  document.getElementById("wol_password").value = "";
+  document.getElementById("wol_password").placeholder = w.passwordLen ? "unchanged" : "";
+  document.getElementById("wol_open").checked = w.passwordLen === 0;
+  document.getElementById("wol_pw_state").textContent = w.passwordLen
+    ? "  set (" + w.passwordLen + " chars, write-only) -- leave empty to keep it"
+    : "  none (open network)";
+  document.getElementById("wol_status").textContent = wolStatusText(w);
+  document.getElementById("woltest").disabled = false;
+}
+
+function parseMac(text) {
+  const hex = text.trim().replace(/[:\-]/g, "");
+  if (!/^[0-9a-fA-F]{12}$/.test(hex)) {
+    throw new Error('wol_mac: "' + text + '" is not a MAC address (aa:bb:cc:dd:ee:ff)');
+  }
+  const mac = new Uint8Array(6);
+  for (let i = 0; i < 6; i++) mac[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return mac;
+}
+
+// [funcid 0x08][field][offset][len][data...]; offset 0 starts a new value.
+async function sendWolField(field, value) {
+  const CHUNK = SET_DATA_LEN - 4;
+  let offset = 0;
+  do {
+    const chunk = value.subarray(offset, offset + CHUNK);
+    const payload = new Uint8Array(3 + chunk.length);
+    payload.set([field, offset, chunk.length]);
+    payload.set(chunk, 3);
+    await sendSet(FUNC_WOL_SET, payload);
+    offset += chunk.length;
+  } while (offset < value.length);
+}
+
+// Validate everything first, then send -- so a typo never half-applies.
+async function writeWolFromForm() {
+  if (!wolAvailable) return;
+  const enc = new TextEncoder();
+  const ssid = enc.encode(document.getElementById("wol_ssid").value);
+  if (ssid.length > 32) throw new Error("wol_ssid is longer than 32 bytes");
+  const macText = document.getElementById("wol_mac").value;
+  const mac = macText.trim() ? parseMac(macText) : new Uint8Array(6);
+  const open = document.getElementById("wol_open").checked;
+  const pw = enc.encode(document.getElementById("wol_password").value);
+  if (!open && pw.length && (pw.length < 8 || pw.length > 63)) {
+    throw new Error("wol_password must be 8..63 bytes (WPA2)");
+  }
+  const enabled = document.getElementById("wol_enabled").checked;
+  if (enabled && (!ssid.length || !macText.trim())) {
+    throw new Error("Wake-on-LAN needs wol_ssid and wol_mac");
+  }
+  await sendWolField(WOL_FIELD_SSID, ssid);
+  await sendWolField(WOL_FIELD_MAC, mac);
+  if (open) await sendWolField(WOL_FIELD_PASSWORD, new Uint8Array(0));
+  else if (pw.length) await sendWolField(WOL_FIELD_PASSWORD, pw);
+  await sendWolField(WOL_FIELD_ENABLED, new Uint8Array([enabled ? 1 : 0]));
+  log("applied Wake-on-LAN settings");
+}
+
+async function refreshWol() {
+  const w = await readWol();
+  if (w) wolFormFrom(w);
+}
+
 async function readInfo() {
   let text = "";
   try {
@@ -205,12 +336,12 @@ async function readInfo() {
 function explainError(e) {
   let msg = String(e);
   if (navigator.userAgent.includes("Windows")) {
-    msg += "\n\nOn Windows this is expected: the config report IDs 0xF6-0xF9 are " +
-           "handled by the firmware but are NOT declared in the DS4 HID report " +
-           "descriptor (kept byte-identical to a real DS4 v2), and Windows blocks " +
-           "GET/SET_FEATURE for undeclared report IDs. This page works as-is on " +
-           "Linux, macOS and ChromeOS; on Windows the firmware has to declare " +
-           "those reports first.";
+    msg += "\n\nOn Windows this is expected with the vanilla firmware: its config " +
+           "report IDs 0xF6-0xF9 are NOT declared in the DS4 HID report descriptor " +
+           "(kept byte-identical to a real DS4 v2), and Windows blocks " +
+           "GET/SET_FEATURE for undeclared report IDs. Flash the opinionated " +
+           "firmware (ds4-bridge-opinionated.uf2), which declares them, or use " +
+           "Linux, macOS or ChromeOS.";
   }
   return msg;
 }
@@ -235,6 +366,7 @@ document.getElementById("connect").addEventListener("click", async function () {
     log("connected to " + device.productName);
     await readConfig();
     await readInfo();
+    await refreshWol();
   } catch (e) {
     setStatus("Connect failed.");
     log(explainError(e));
@@ -245,6 +377,7 @@ document.getElementById("read").addEventListener("click", async function () {
   try {
     await readConfig();
     await readInfo();
+    await refreshWol();
     setStatus("Read OK.");
   } catch (e) {
     setStatus("Read failed.");
@@ -255,7 +388,9 @@ document.getElementById("read").addEventListener("click", async function () {
 document.getElementById("apply").addEventListener("click", async function () {
   try {
     bodyFromForm();
+    await writeWolFromForm();
     await sendSet(FUNC_UPDATE, body);
+    await refreshWol();
     setStatus("Applied to RAM (lost on reboot -- use Apply + save to persist).");
     log("applied config to RAM");
   } catch (e) {
@@ -267,8 +402,10 @@ document.getElementById("apply").addEventListener("click", async function () {
 document.getElementById("save").addEventListener("click", async function () {
   try {
     bodyFromForm();
+    await writeWolFromForm();
     await sendSet(FUNC_UPDATE, body);
-    await sendSet(FUNC_SAVE, null);
+    await sendSet(FUNC_SAVE, null); // persists the Wake-on-LAN settings too
+    await refreshWol();
     setStatus("Applied and saved to flash.");
     log("applied + saved config to flash");
   } catch (e) {
@@ -285,10 +422,40 @@ document.getElementById("reconnect").addEventListener("click", async function ()
     setStatus("Reconnect sent -- the device leaves the bus and comes back; press Connect again.");
     log("sent USB reconnect");
     setButtons(false);
+    document.getElementById("woltest").disabled = true;
     device = null;
   } catch (e) {
     setStatus("Reconnect failed.");
     log(explainError(e));
+  }
+});
+
+// Run the firmware's test session (join + 5 bursts, whatever the USB state)
+// and follow its progress.
+document.getElementById("woltest").addEventListener("click", async function () {
+  const btn = this;
+  btn.disabled = true;
+  try {
+    await sendSet(FUNC_WOL_TEST, null);
+    log("Wake-on-LAN test started");
+    const sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+    const deadline = Date.now() + 35000;
+    let w = null;
+    await sleep(500);
+    while (Date.now() < deadline) {
+      w = await readWol();
+      document.getElementById("wol_status").textContent = wolStatusText(w);
+      if (w.state === 0 && w.result !== 0) break;
+      await sleep(500);
+    }
+    log(w && w.packets
+      ? "Wake-on-LAN test OK: joined Wi-Fi, sent " + w.packets + " magic packets " +
+        "(a running PC ignores them; Wireshark filter 'wol' shows them arriving)"
+      : "Wake-on-LAN test: no packets sent -- check SSID/password (2.4 GHz WPA2 or open)");
+  } catch (e) {
+    log(explainError(e));
+  } finally {
+    btn.disabled = false;
   }
 });
 

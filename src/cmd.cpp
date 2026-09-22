@@ -16,6 +16,7 @@
 #include "pico/time.h"
 #include "audio.h"
 #include "wake.h"
+#include "wol.h"
 
 extern bool spk_active;
 
@@ -24,13 +25,39 @@ bool is_pico_cmd(uint8_t report_id) {
         report_id == 0xf7 ||
         report_id == 0xf8 ||
         report_id == 0xf9
+#if OPINIONATED
+        || report_id == 0xfa
+#endif
     ) {
         return true;
     }
     return false;
 }
 
+static uint16_t pico_cmd_get_raw(uint8_t report_id, uint8_t *buffer, uint16_t reqlen);
+
+// Vanilla returns each report at its natural length (the reports are
+// undeclared, only hidraw-style hosts reach them). The opinionated build
+// declares 0xF6-0xFA with 63 data bytes in the HID report descriptor, so answer
+// with the full declared length -- Windows' HID stack expects that.
 uint16_t pico_cmd_get(uint8_t report_id, uint8_t *buffer, uint16_t reqlen) {
+#if OPINIONATED
+    constexpr uint16_t DECLARED_LEN = 63;
+    if (reqlen > DECLARED_LEN) reqlen = DECLARED_LEN;
+    memset(buffer, 0, reqlen);
+    const uint16_t len = pico_cmd_get_raw(report_id, buffer, reqlen);
+    return len ? reqlen : 0;
+#else
+    return pico_cmd_get_raw(report_id, buffer, reqlen);
+#endif
+}
+
+static uint16_t pico_cmd_get_raw(uint8_t report_id, uint8_t *buffer, uint16_t reqlen) {
+#if OPINIONATED
+    if (report_id == 0xfa) {
+        return wol_get_status(buffer, reqlen);
+    }
+#endif
     if (report_id == 0xf7) {
         printf("[HID] Receive 0xf7 getting config\n");
         if (sizeof(Config_body) > reqlen) {
@@ -90,6 +117,8 @@ void pico_cmd_set(uint8_t report_id, uint8_t const *buffer, uint16_t bufsize) {
     //      flag bytes from the host, e.g. for the mic-enable research)
     // 0x07 set the 0x11 output header byte 2 for subsequent outputs
     //      (debug: bits 0-2 = EnableMic, bit7 = EnableAudio)
+    // 0x08 (opinionated) set a Wake-on-LAN field, see wol_set_field()
+    // 0x09 (opinionated) Wake-on-LAN test: join Wi-Fi, send a short burst
     if (buffer[0] == 0x01) {
 #if ENABLE_VERBOSE
         printf("[CMD] Enter config set func\n");
@@ -128,4 +157,13 @@ void pico_cmd_set(uint8_t report_id, uint8_t const *buffer, uint16_t bufsize) {
         printf("[CMD] Output header byte2 = 0x%02X\n", buffer[1]);
         ds4_set_output_hdr2(buffer[1]);
     }
+#if OPINIONATED
+    if (buffer[0] == 0x08) {
+        wol_set_field(buffer + 1, bufsize - 1);
+    }
+    if (buffer[0] == 0x09) {
+        printf("[CMD] Wake-on-LAN test\n");
+        wol_start_test();
+    }
+#endif
 }
