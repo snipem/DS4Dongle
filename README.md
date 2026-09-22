@@ -4,6 +4,10 @@ Firmware for the Raspberry Pi Pico 2 W that hosts a DualShock 4 over
 Bluetooth Classic and presents it to the PC as a **wired DualShock 4 v2**
 (054C:09CC) — including audio to the controller's speaker and headphone jack.
 
+ai;dr: Wireless DS4 dongle for PCs. Acts as a USB connected DS4. Vanilla version: sane defaults that just work. Opinionated version: Feature rich firmware with Wake-On-Lan support and higher refresh rate.
+
+-----
+
 Adapted from [awalol/DS5Dongle](https://github.com/awalol/DS5Dongle), which
 does the same for the DualSense. If you have a DualSense, use DS5Dongle
 directly.
@@ -70,7 +74,10 @@ work on Windows too (see [Firmware variants](#firmware-variants)).
 
 | | `ds4-bridge.uf2` (vanilla) | `ds4-bridge-opinionated.uf2` |
 |---|---|---|
+| Description | DS4 USB-BT Bridge that tries to act as a regular DS4 | DS4 USB-BT Bridge that introduces comfort features like higher polling rates, system wake-up on button press and web configuration |
 | USB persona | byte-identical to a real DS4 v2 | DS4 v2 + declared config reports 0xF6-0xFA (distinguishable) |
+| Features | Might be safe for anti-cheat protection (no guarantees) | Has a much higher polling rate (4x) than the default controller. Wake-on-Lan feature to wakeup the host PC. Browser Config Tool even on Windows |
+| Disadvantages | Windows will not allow to access the Browser Config Tool | Might be detected by Anti Cheat |
 | Config tools on Windows | no | yes |
 | Default polling rate | 250 Hz (stock) | real-time / 1 kHz |
 | Wi-Fi Wake-on-LAN | no | yes |
