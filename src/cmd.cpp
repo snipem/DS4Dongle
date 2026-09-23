@@ -30,7 +30,25 @@ bool is_pico_cmd(uint8_t report_id) {
     return false;
 }
 
+static uint16_t pico_cmd_get_raw(uint8_t report_id, uint8_t *buffer, uint16_t reqlen);
+
+// Vanilla returns each report at its natural length (the reports are
+// undeclared, only hidraw-style hosts reach them). The opinionated build
+// declares 0xF6-0xF9 with 63 data bytes in the HID report descriptor, so answer
+// with the full declared length -- Windows' HID stack expects that.
 uint16_t pico_cmd_get(uint8_t report_id, uint8_t *buffer, uint16_t reqlen) {
+#if OPINIONATED
+    constexpr uint16_t DECLARED_LEN = 63;
+    if (reqlen > DECLARED_LEN) reqlen = DECLARED_LEN;
+    memset(buffer, 0, reqlen);
+    const uint16_t len = pico_cmd_get_raw(report_id, buffer, reqlen);
+    return len ? reqlen : 0;
+#else
+    return pico_cmd_get_raw(report_id, buffer, reqlen);
+#endif
+}
+
+static uint16_t pico_cmd_get_raw(uint8_t report_id, uint8_t *buffer, uint16_t reqlen) {
     if (report_id == 0xf7) {
         printf("[HID] Receive 0xf7 getting config\n");
         if (sizeof(Config_body) > reqlen) {

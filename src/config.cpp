@@ -13,10 +13,17 @@
 #include "hardware/sync.h"
 #include "pico/cyw43_arch.h"
 #include "pico/flash.h"
+#include "pico/btstack_flash_bank.h"
 
 constexpr uint32_t CONFIG_MAGIC = 0x66ccff00;
 constexpr uint16_t CONFIG_VERSION = 6; // 如果想要强制重置配置，再更新 CONFIG_VERSION。
-constexpr uint32_t CONFIG_FLASH_OFFSET = PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE;
+// The sector right below BTstack's pairing storage -- NOT the last sector of
+// flash. picotool appends an RP2350-E10 workaround block at 0x10ffff00 (the top
+// of a 16 MB address space) to every UF2; on the Pico 2 W's 4 MB chip that
+// address wraps onto the last sector, so every UF2 flash erased a config kept
+// there. The SDK keeps the BTstack bank clear of that sector for the same
+// reason (PICO_FLASH_BANK_STORAGE_OFFSET), so sit directly below it.
+constexpr uint32_t CONFIG_FLASH_OFFSET = PICO_FLASH_BANK_STORAGE_OFFSET - FLASH_SECTOR_SIZE;
 static Config config{};
 
 // 编译期保护
@@ -74,10 +81,11 @@ void config_valid() {
         printf("[Config] disable_pico_led is invalid\n");
     }
     if (body->polling_rate_mode > 2) {
-        // Default to stock 250 Hz: a real DS4 v2's HID endpoints advertise
-        // bInterval 5, so faster modes make the dongle distinguishable over
-        // USB. Higher rates stay available as an explicit opt-in.
-        body->polling_rate_mode = 0;
+        // Vanilla defaults to stock 250 Hz: a real DS4 v2's HID endpoints
+        // advertise bInterval 5, so faster modes make the dongle
+        // distinguishable over USB. Higher rates stay available as an explicit
+        // opt-in. The opinionated build defaults to real-time (1 kHz).
+        body->polling_rate_mode = OPINIONATED ? 2 : 0;
         printf("[Config] polling_rate_mode is invalid\n");
     }
     if (body->audio_buffer_length < 16 || body->audio_buffer_length > 128) {

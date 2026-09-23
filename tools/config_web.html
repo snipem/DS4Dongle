@@ -205,12 +205,12 @@ async function readInfo() {
 function explainError(e) {
   let msg = String(e);
   if (navigator.userAgent.includes("Windows")) {
-    msg += "\n\nOn Windows this is expected: the config report IDs 0xF6-0xF9 are " +
-           "handled by the firmware but are NOT declared in the DS4 HID report " +
-           "descriptor (kept byte-identical to a real DS4 v2), and Windows blocks " +
-           "GET/SET_FEATURE for undeclared report IDs. This page works as-is on " +
-           "Linux, macOS and ChromeOS; on Windows the firmware has to declare " +
-           "those reports first.";
+    msg += "\n\nOn Windows this is expected with the vanilla firmware: its config " +
+           "report IDs 0xF6-0xF9 are NOT declared in the DS4 HID report descriptor " +
+           "(kept byte-identical to a real DS4 v2), and Windows blocks " +
+           "GET/SET_FEATURE for undeclared report IDs. Flash the opinionated " +
+           "firmware (ds4-bridge-opinionated.uf2), which declares them, or use " +
+           "Linux, macOS or ChromeOS.";
   }
   return msg;
 }
