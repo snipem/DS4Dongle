@@ -33,7 +33,6 @@ void bt_inquiring_led();
 // BOOTSEL button actions, dispatched from button_functions.cpp.
 void bt_bootsel_click_action();
 void bt_bootsel_hold_action();
-void bt_blacklist_persist_if_dirty();
 // DS4 output report 0x11 helpers (payload = USB-0x05-style, flags byte first).
 void ds4_output(const uint8_t *payload, uint16_t payload_len);
 void bt_get_controller_mac(uint8_t mac[6]);

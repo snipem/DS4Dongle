@@ -13,19 +13,19 @@ Protocol (see src/cmd.cpp / src/config.h):
 
 Config_body is a packed struct; this tool derives the binary layout from FIELDS.
 
-PLATFORM NOTE (Windows): the config report IDs 0xF6-0xF9 are handled by the
-firmware but are deliberately NOT declared in the DS4 HID report descriptor
-(it is kept byte-identical to a real DS4 v2, whose feature reports stop at 0xF2).
-Windows' HID class driver rejects GET/SET_FEATURE for any report ID absent from
-the descriptor, so this tool cannot reach the config on Windows with stock
-firmware -- every command fails with "read error". It works on Linux, where
-hidraw passes the raw request through regardless of the descriptor. See
-open_device()/read_config() for the diagnostic. To use it on Windows the
-firmware must declare 0xF6-0xF9 as HID feature reports (and be reflashed).
+FIRMWARE VARIANTS:
+  vanilla     (ds4-bridge.uf2) USB-identical to a real DS4 v2. The config report
+              IDs 0xF6-0xF9 are handled but deliberately NOT declared in the HID
+              report descriptor, and Windows' HID class driver rejects
+              GET/SET_FEATURE for any undeclared report ID -- so on Windows
+              every command fails with "read error". Works on Linux (hidraw
+              passes the raw request through regardless of the descriptor).
+  opinionated (ds4-bridge-opinionated.uf2) declares 0xF6-0xF9, so this tool
+              works on Windows too.
 
 Requires: pip install hidapi
 
-Examples (Linux):
+Examples:
   python config_tool.py get
   python config_tool.py set speaker_volume=90 enable_wake=1
   python config_tool.py set inactive_time=10 --no-save
@@ -154,18 +154,18 @@ def open_device():
 
 
 def _feature_read_help(report_id):
-    # The config report IDs (0xF6-0xF9) are handled by the firmware but are not
-    # declared in the DS4 HID report descriptor. Windows' HID class driver
+    # The vanilla firmware handles the config report IDs (0xF6-0xF9) but does not
+    # declare them in the DS4 HID report descriptor. Windows' HID class driver
     # rejects GET/SET_FEATURE for undeclared report IDs, which surfaces here as a
     # bare "read error". Give the user the real reason instead.
     msg = (f"Failed reading config report 0x{report_id:02X}.")
     if platform.system() == "Windows":
-        msg += ("\n\nThis is expected on Windows: report IDs 0x{:02X}-0x{:02X} are not "
-                "declared in the DS4 HID\nreport descriptor (kept byte-identical to a real "
-                "DS4 v2), and Windows blocks\nGET/SET_FEATURE for any undeclared report ID. "
-                "The DS4Dongle config tool only\nworks on Linux (hidraw passes the raw request "
-                "through) unless the firmware is\nchanged to declare these reports as HID "
-                "feature reports.").format(REPORT_SET, REPORT_GET_VERSION)
+        msg += ("\n\nThis is expected on Windows with the vanilla firmware: report IDs "
+                "0x{:02X}-0x{:02X} are not\ndeclared in its HID report descriptor (kept "
+                "byte-identical to a real DS4 v2), and\nWindows blocks GET/SET_FEATURE for "
+                "any undeclared report ID. Flash the opinionated\nfirmware "
+                "(ds4-bridge-opinionated.uf2), which declares them, or configure from "
+                "Linux.").format(REPORT_SET, REPORT_GET_VERSION)
     return msg
 
 
@@ -284,7 +284,7 @@ def cmd_set(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Read and modify ds5dongle config over USB HID.")
+    parser = argparse.ArgumentParser(description="Read and modify DS4Dongle config over USB HID.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("get", help="read and print the current config").set_defaults(func=cmd_get)

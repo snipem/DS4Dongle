@@ -11,8 +11,9 @@ PORT   ?= 8000
 
 PRODUCTION_DIR := build/standard
 DEBUG_DIR      := build/serial
+OPINIONATED_DIR := build/opinionated
 
-.PHONY: all build production debug deploy deploy-debug serve clean distclean
+.PHONY: all build production debug opinionated deploy deploy-debug deploy-opinionated serve clean distclean
 
 all: build
 
@@ -36,6 +37,16 @@ debug:
 		-DENABLE_SERIAL=ON -DENABLE_VERBOSE=ON
 	cmake --build $(DEBUG_DIR)
 
+## Opinionated firmware (Windows-configurable, 1 kHz default)
+## -> $(OPINIONATED_DIR)/ds4-bridge.uf2
+opinionated:
+	cmake -S . -B $(OPINIONATED_DIR) -G $(GENERATOR) \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DPICO_SDK_PATH=$(PICO_SDK_PATH) \
+		-DVERSION=$(VERSION) \
+		-DOPINIONATED=ON
+	cmake --build $(OPINIONATED_DIR)
+
 ## Reboot the attached dongle into BOOTSEL and flash the production build.
 ## reboot_bootsel.py "failing" is expected if the dongle is already sitting
 ## in BOOTSEL mass-storage mode (no HID device to send it to) -- ignore it
@@ -49,6 +60,11 @@ deploy-debug: debug
 	-python3 tools/reboot_bootsel.py
 	tools/flash.sh $(DEBUG_DIR)/ds4-bridge.uf2 30
 
+## Same, but flashes the opinionated build.
+deploy-opinionated: opinionated
+	-python3 tools/reboot_bootsel.py
+	tools/flash.sh $(OPINIONATED_DIR)/ds4-bridge.uf2 30
+
 ## Serve the WebHID config UI (tools/config_web.html) over http://localhost.
 ## WebHID needs a secure context, so the page has to be served -- opening it as
 ## a file:// URL leaves navigator.hid undefined. Override the port with
@@ -60,6 +76,7 @@ serve:
 clean:
 	cmake --build $(PRODUCTION_DIR) --target clean 2>/dev/null || true
 	cmake --build $(DEBUG_DIR) --target clean 2>/dev/null || true
+	cmake --build $(OPINIONATED_DIR) --target clean 2>/dev/null || true
 
 distclean:
-	rm -rf $(PRODUCTION_DIR) $(DEBUG_DIR)
+	rm -rf $(PRODUCTION_DIR) $(DEBUG_DIR) $(OPINIONATED_DIR)

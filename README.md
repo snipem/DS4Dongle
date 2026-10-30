@@ -4,6 +4,10 @@ Firmware for the Raspberry Pi Pico 2 W that hosts a DualShock 4 over
 Bluetooth Classic and presents it to the PC as a **wired DualShock 4 v2**
 (054C:09CC) — including audio to the controller's speaker and headphone jack.
 
+ai;dr: Wireless DS4 dongle for PCs. Acts as a USB connected DS4. Vanilla version: sane defaults that just work. Opinionated version: configurable on Windows, higher refresh rate.
+
+-----
+
 Adapted from [awalol/DS5Dongle](https://github.com/awalol/DS5Dongle), which
 does the same for the DualSense. If you have a DualSense, use DS5Dongle
 directly.
@@ -38,10 +42,12 @@ See [Releases](https://github.com/snipem/DS4Dongle/releases) for the images.
   `audio_follow_jack=0` for a permanently visible audio device
 - Volume/mute from the host mapped to the controller
 - Pairing and controller management via the BOOTSEL button, persistent
-  pairings and blacklist in flash
+  pairings in flash
 - Configurable over HID feature reports (`tools/config_tool.py`, or
   `tools/config_web.html` in Chrome/Edge): polling rate, audio routing,
   jack-following audio device, inactivity timeout, wake-on-PS, and more
+- Opinionated variant: configurable on Windows and 1 kHz by default (see
+  [Firmware variants](#firmware-variants))
 
 ## Configuring
 
@@ -56,10 +62,29 @@ Two front-ends for the same HID config reports:
   # then open http://localhost:8000/tools/config_web.html
   ```
 
-Both are blocked on **Windows**: the config report IDs 0xF6-0xF9 are handled by
-the firmware but are not declared in the HID report descriptor (which is kept
-byte-identical to a real DS4 v2), and Windows drops GET/SET_FEATURE for any
-undeclared report id. They work on Linux, macOS and ChromeOS as-is.
+With the **vanilla** firmware both are blocked on **Windows**: the config report
+IDs 0xF6-0xF9 are handled by the firmware but are not declared in the HID report
+descriptor (which is kept byte-identical to a real DS4 v2), and Windows drops
+GET/SET_FEATURE for any undeclared report id. They work on Linux, macOS and
+ChromeOS as-is. The **opinionated** firmware declares the reports, so both tools
+work on Windows too (see [Firmware variants](#firmware-variants)).
+
+## Firmware variants
+
+| | `ds4-bridge.uf2` (vanilla) | `ds4-bridge-opinionated.uf2` |
+|---|---|---|
+| Description | DS4 USB-BT Bridge that tries to act as a regular DS4 | DS4 USB-BT Bridge that introduces comfort features like higher polling rates and web configuration on Windows |
+| USB persona | byte-identical to a real DS4 v2 | DS4 v2 + declared config reports 0xF6-0xF9 (distinguishable) |
+| Features | Might be safe for anti-cheat protection (no guarantees) | Has a much higher polling rate (4x) than the default controller. Browser Config Tool even on Windows |
+| Disadvantages | Windows will not allow to access the Browser Config Tool | Might be detected by Anti Cheat |
+| Config tools on Windows | no | yes |
+| Default polling rate | 250 Hz (stock) | real-time / 1 kHz |
+
+Waveshare RP2350B-Plus-W builds: `ds4-bridge-waveshare.uf2` (vanilla) and
+`ds4-bridge-waveshare-opinionated.uf2`.
+
+The default polling rate only applies to a fresh config; a dongle that already
+has a saved config keeps its `polling_rate_mode` when you switch variants.
 
 ## Flashing
 
@@ -99,7 +124,8 @@ cmake --build build
 # → build/ds4-bridge.uf2
 ```
 
-`-DENABLE_SERIAL=ON -DENABLE_VERBOSE=ON` builds the debug variant.
+`-DENABLE_SERIAL=ON -DENABLE_VERBOSE=ON` builds the debug variant;
+`-DOPINIONATED=ON` (or `make opinionated`) builds the opinionated variant.
 
 ## Debugging
 
@@ -124,7 +150,7 @@ To use it:
 3. Reproduce the problem (pair, connect, play audio). Log lines are prefixed
    by subsystem: `[HCI]` Bluetooth link events (inquiry, connect, auth,
    encryption, disconnect reasons), `[L2CAP]` HID channel setup and traffic,
-   `[BT]` button actions and pairing state, `[BLACKLIST]` pairing blacklist,
+   `[BT]` button actions and pairing state,
    `[AUDIO]`/`[Audio]` USB audio and SBC pipeline, `[CMD]`/`[Config]` config
    reports, `[USBHID]` report forwarding.
 

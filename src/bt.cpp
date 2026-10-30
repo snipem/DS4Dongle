@@ -47,21 +47,10 @@ bool bt_inquiring = false;
 // LED triple-flash confirmation state for clear-all action
 static int bt_clear_flash_toggles_remaining = 0;
 static uint32_t bt_clear_flash_last_toggle_ms = 0;
-// Persistent blacklist of controllers cleared by BOOTSEL hold. Survives
-// power-cycles via BTstack TLV flash storage. Blocked at CONNECTION_REQUEST
-// so PS-only auto-reconnect fails; INQUIRY_RESULT path is still allowed so
-// the user can intentionally re-pair the controller in PS+Share mode, which
-// removes that MAC from the blacklist on successful pair.
+// TLV tag of the former persistent pairing blacklist (removed). A stale entry
+// is deleted once at startup so a controller blocked by an older firmware
+// can reconnect again.
 #define BT_BLACKLIST_TLV_TAG  ((uint32_t) 0x424C434B) // ASCII 'BLCK'
-static bd_addr_t bt_cleared_addrs[NVM_NUM_LINK_KEYS];
-static int bt_cleared_addrs_count = 0;
-// Deferred-persist state: bt_blacklist_remove() sets bt_blacklist_dirty
-// instead of writing flash inline (flash_safe_execute() blocks ~50ms with
-// interrupts disabled and races with multicore + CYW43 SPI bus, breaking
-// pair-completion audio and HID init). The main loop calls
-// bt_blacklist_persist_if_dirty() once the connection is stable.
-static bool bt_blacklist_dirty = false;
-static uint32_t bt_blacklist_dirty_ms = 0;
 static hci_con_handle_t acl_handle = HCI_CON_HANDLE_INVALID;
 static uint16_t hid_control_cid;
 static uint16_t hid_interrupt_cid;
@@ -186,107 +175,16 @@ int bt_init() {
     }
 }*/
 
-// Persist the current bt_cleared_addrs[] blacklist to BTstack TLV flash.
-// Empty list -> delete the tag. Called whenever the list changes.
-static void bt_blacklist_persist() {
-    const btstack_tlv_t *tlv = NULL;
-    void *tlv_ctx = NULL;
+static void bt_blacklist_delete_legacy() {
+    const btstack_tlv_t *tlv = nullptr;
+    void *tlv_ctx = nullptr;
     btstack_tlv_get_instance(&tlv, &tlv_ctx);
-    if (!tlv) {
-        printf("[BLACKLIST] No TLV instance available, not persisting\n");
-        return;
-    }
-    if (bt_cleared_addrs_count == 0) {
+    if (!tlv) return;
+    uint8_t probe[6];
+    if (tlv->get_tag(tlv_ctx, BT_BLACKLIST_TLV_TAG, probe, sizeof(probe)) > 0) {
         tlv->delete_tag(tlv_ctx, BT_BLACKLIST_TLV_TAG);
-        printf("[BLACKLIST] Empty, deleted from flash\n");
-    } else {
-        const uint32_t bytes = bt_cleared_addrs_count * (uint32_t) sizeof(bd_addr_t);
-        int rc = tlv->store_tag(tlv_ctx, BT_BLACKLIST_TLV_TAG,
-                                (const uint8_t *) bt_cleared_addrs, bytes);
-        printf("[BLACKLIST] Persisted %d entries (%lu bytes) to flash, rc=%d\n",
-               bt_cleared_addrs_count, bytes, rc);
+        printf("[BT] Deleted the legacy pairing blacklist from flash\n");
     }
-}
-
-// Load the blacklist from BTstack TLV flash into bt_cleared_addrs[].
-// Called once after BTstack reaches HCI_STATE_WORKING.
-static void bt_blacklist_load() {
-    const btstack_tlv_t *tlv = NULL;
-    void *tlv_ctx = NULL;
-    btstack_tlv_get_instance(&tlv, &tlv_ctx);
-    if (!tlv) {
-        bt_cleared_addrs_count = 0;
-        return;
-    }
-    int len = tlv->get_tag(tlv_ctx, BT_BLACKLIST_TLV_TAG,
-                           (uint8_t *) bt_cleared_addrs, sizeof(bt_cleared_addrs));
-    if (len > 0 && (len % (int) sizeof(bd_addr_t)) == 0) {
-        bt_cleared_addrs_count = len / (int) sizeof(bd_addr_t);
-        if (bt_cleared_addrs_count > NVM_NUM_LINK_KEYS) {
-            bt_cleared_addrs_count = NVM_NUM_LINK_KEYS;
-        }
-        printf("[BLACKLIST] Loaded %d entries from flash:\n", bt_cleared_addrs_count);
-        for (int i = 0; i < bt_cleared_addrs_count; i++) {
-            printf("[BLACKLIST]   %s\n", bd_addr_to_str(bt_cleared_addrs[i]));
-        }
-    } else {
-        bt_cleared_addrs_count = 0;
-        printf("[BLACKLIST] No persisted entries\n");
-    }
-}
-
-// Check whether the given address is currently blacklisted.
-static bool bt_blacklist_contains(bd_addr_t addr) {
-    for (int i = 0; i < bt_cleared_addrs_count; i++) {
-        if (bd_addr_cmp(addr, bt_cleared_addrs[i]) == 0) return true;
-    }
-    return false;
-}
-
-// Add an address to the blacklist if not already present (de-duped, capped at
-// NVM_NUM_LINK_KEYS). The BOOTSEL-hold clear uses this so repeated holds
-// accumulate rather than rebuild (see bt_bootsel_hold_action()).
-static void bt_blacklist_add_unique(bd_addr_t addr) {
-    if (bt_cleared_addrs_count >= NVM_NUM_LINK_KEYS) return;
-    for (int i = 0; i < bt_cleared_addrs_count; i++) {
-        if (bd_addr_cmp(addr, bt_cleared_addrs[i]) == 0) return; // already listed
-    }
-    bd_addr_copy(bt_cleared_addrs[bt_cleared_addrs_count++], addr);
-    printf("[BLACKLIST] Added %s\n", bd_addr_to_str(addr));
-}
-
-// Remove the given address from the blacklist (if present). Defers the
-// flash persist to the main loop via bt_blacklist_dirty so the L2CAP HID
-// open hot path stays fast (audio + HID init must not block on flash).
-static void bt_blacklist_remove(bd_addr_t addr) {
-    for (int i = 0; i < bt_cleared_addrs_count; i++) {
-        if (bd_addr_cmp(addr, bt_cleared_addrs[i]) == 0) {
-            // Shift remaining entries down
-            for (int j = i; j < bt_cleared_addrs_count - 1; j++) {
-                bd_addr_copy(bt_cleared_addrs[j], bt_cleared_addrs[j + 1]);
-            }
-            bt_cleared_addrs_count--;
-            printf("[BLACKLIST] Removed %s on successful pair, %d remaining (persist deferred)\n",
-                   bd_addr_to_str(addr), bt_cleared_addrs_count);
-            bt_blacklist_dirty = true;
-            bt_blacklist_dirty_ms = to_ms_since_boot(get_absolute_time());
-            return;
-        }
-    }
-}
-
-// Called from the main loop. If the blacklist has been modified in RAM
-// (by bt_blacklist_remove()) and a settle window has passed since the last
-// modification, persist it to flash. The settle window ensures we never
-// take the flash blackout while the controller is still negotiating its
-// initial HID/audio state right after pair completion.
-void bt_blacklist_persist_if_dirty() {
-    if (!bt_blacklist_dirty) return;
-    uint32_t now = to_ms_since_boot(get_absolute_time());
-    if (now - bt_blacklist_dirty_ms < 5000) return;
-    bt_blacklist_dirty = false;
-    printf("[BLACKLIST] Settle window elapsed, persisting deferred change\n");
-    bt_blacklist_persist();
 }
 
 // BOOTSEL click action: trigger a fresh inquiry to pair another controller.
@@ -304,40 +202,14 @@ void bt_bootsel_click_action() {
 }
 
 // BOOTSEL hold action: disconnect current controller and delete all link keys.
-// Snapshots the cleared addresses (from stored keys and the currently-connected
-// MAC) into the persistent blacklist so PS-only auto-reconnect is blocked even
-// across power-cycles. The MAC is removed from the blacklist when the user
-// explicitly re-pairs the controller (in PS+Share mode) and L2CAP HID opens.
 // Triggers a six-flash LED confirmation via bt_inquiring_led().
 void bt_bootsel_hold_action() {
     printf("[BT] BOOTSEL held - clearing all pairings\n");
-
-    // Additive + de-duped: merge the currently-stored controllers into the
-    // EXISTING blacklist. Do NOT reset the list first -- on a second hold no link
-    // keys remain, so a rebuild would produce an empty list, and
-    // bt_blacklist_persist() delete_tag's an empty list, silently un-blacklisting
-    // the controller that was just cleared.
-    btstack_link_key_iterator_t it;
-    if (gap_link_key_iterator_init(&it)) {
-        bd_addr_t addr;
-        link_key_t key;
-        link_key_type_t type;
-        while (gap_link_key_iterator_get_next(&it, addr, key, &type)) {
-            bt_blacklist_add_unique(addr);
-        }
-        gap_link_key_iterator_done(&it);
-    }
-
-    // Belt + suspenders: if connected, blacklist the live controller's MAC too
-    // (its key may not be persisted yet), then drop the link.
     if (hid_interrupt_cid != 0) {
-        bt_blacklist_add_unique(current_device_addr);
         bt_disconnect();
     }
     gap_delete_all_link_keys();
-    bt_blacklist_persist();
-    printf("[BT] All link keys deleted; %d MAC(s) blacklisted persistently\n",
-           bt_cleared_addrs_count);
+    printf("[BT] All link keys deleted\n");
 
     bt_clear_flash_toggles_remaining = 12;
     bt_clear_flash_last_toggle_ms = to_ms_since_boot(get_absolute_time());
@@ -386,7 +258,7 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
                 gap_set_page_scan_activity(0x0012, 0x0012); // 11.25ms
                 gap_set_page_scan_type(PAGE_SCAN_MODE_INTERLACED);
                 printf("[BT] Stack ready, start inquiry\n");
-                bt_blacklist_load();
+                bt_blacklist_delete_legacy();
                 gap_inquiry_start(30);
                 bt_inquiring = true;
             }
@@ -410,9 +282,6 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
             }
 
             // CoD 0x002508 = Gamepad (Major: Peripheral, Minor: Gamepad)
-            // Blacklisted MACs are NOT filtered here so the user can intentionally
-            // re-pair them in PS+Share mode (dongle-initiated path). PS-only
-            // (controller-initiated) is blocked at CONNECTION_REQUEST.
             if ((cod & 0x000F00) == 0x000500) {
                 printf("[HCI] Gamepad found: %s (CoD: 0x%06x)\n", bd_addr_to_str(addr), (unsigned int) cod);
                 bd_addr_copy(current_device_addr, addr);
@@ -475,23 +344,6 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
                 const hci_con_handle_t handle = hci_event_connection_complete_get_connection_handle(packet);
                 bd_addr_t conn_addr;
                 hci_event_connection_complete_get_bd_addr(packet, conn_addr);
-
-                // BTstack auto-accepts incoming connections internally, so our
-                // CONNECTION_REQUEST-time reject is racing with hci_run() and
-                // doesn't reliably block. Catch the connection here, after it
-                // has completed but before we set up any state or request auth,
-                // and disconnect immediately with auth-failure reason.
-                //
-                // Only block INCOMING connections (controller PAGE'd us, e.g. PS-only
-                // auto-reconnect). Outgoing connections that we initiated via inquiry
-                // (PS+Share user-explicit re-pair) have new_pair == true and are
-                // allowed through so the blacklist entry can be removed at HID open.
-                if (!new_pair && bt_blacklist_contains(conn_addr)) {
-                    printf("[HCI] Incoming connection from blacklisted %s on handle=0x%04X - disconnecting\n",
-                           bd_addr_to_str(conn_addr), handle);
-                    hci_send_cmd(&hci_disconnect, handle, 0x05);
-                    break;
-                }
 
                 acl_handle = handle;
                 bt_rssi = 0;
@@ -587,11 +439,6 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
             hci_event_connection_request_get_bd_addr(packet, addr);
             const uint32_t cod = hci_event_connection_request_get_class_of_device(packet);
             printf("[HCI] Incoming ACL request from %s cod=0x%06x\n", bd_addr_to_str(addr), (unsigned int) cod);
-            if (bt_blacklist_contains(addr)) {
-                printf("[HCI] Rejecting connection from %s (MAC is on persistent blacklist; re-pair via PS+Share)\n", bd_addr_to_str(addr));
-                hci_send_cmd(&hci_reject_connection_request, addr, 0x0F);
-                break;
-            }
             if ((cod & 0x000F00) == 0x000500) {
                 bd_addr_copy(current_device_addr, addr);
                 gap_inquiry_stop();
@@ -727,10 +574,6 @@ static void __not_in_flash_func(l2cap_packet_handler)(uint8_t packet_type, uint1
                 } else if (psm == PSM_HID_INTERRUPT) {
                     printf("[L2CAP] HID Interrupt opened cid=0x%04X\n", local_cid);
                     hid_interrupt_cid = local_cid;
-                    // Successful pair removes this specific MAC from the persistent
-                    // blacklist (treated as user-explicit re-pair in PS+Share mode).
-                    bt_blacklist_remove(current_device_addr);
-
                     if (!get_config().disable_pico_led) {
                         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
                     }

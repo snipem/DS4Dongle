@@ -88,7 +88,6 @@ static void button_dispatch(int clicks) {
 //   - hold (>= HOLD_SAMPLES, ~1.5 s) -> clear all pairings
 //   - 1 click  -> pair / switch        2 clicks -> reboot        3 clicks -> BOOTSEL
 // Clicks are counted across the inter-click window; the action fires when it closes.
-// Also services the deferred blacklist persist on the same cadence.
 void button_check() {
     // No connection gate: safe to poll during audio because button_read_bootsel()
     // uses flash_safe_execute(), which parks core1 (the audio core) for the QSPI
@@ -96,8 +95,6 @@ void button_check() {
     uint32_t now = to_ms_since_boot(get_absolute_time());
     if (now - button_last_check_ms < 100) return;
     button_last_check_ms = now;
-
-    bt_blacklist_persist_if_dirty();
 
     bool pressed = button_read_bootsel();
 
