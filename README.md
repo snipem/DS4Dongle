@@ -4,7 +4,7 @@ Firmware for the Raspberry Pi Pico 2 W that hosts a DualShock 4 over
 Bluetooth Classic and presents it to the PC as a **wired DualShock 4 v2**
 (054C:09CC) — including audio to the controller's speaker and headphone jack.
 
-ai;dr: Wireless DS4 dongle for PCs. Acts as a USB connected DS4. Vanilla version: sane defaults that just work. Opinionated version: configurable on Windows, higher refresh rate.
+ai;dr: Wireless DS4 dongle for PCs. Acts as a USB connected DS4. Vanilla version: sane defaults that just work. Opinionated version: configurable on Windows, higher refresh rate, wakes the PC with the PS button.
 
 -----
 
@@ -46,7 +46,7 @@ See [Releases](https://github.com/snipem/DS4Dongle/releases) for the images.
 - Configurable over HID feature reports (`tools/config_tool.py`, or
   `tools/config_web.html` in Chrome/Edge): polling rate, audio routing,
   jack-following audio device, inactivity timeout, wake-on-PS, and more
-- Opinionated variant: configurable on Windows and 1 kHz by default (see
+- Opinionated variant: configurable on Windows, 1 kHz and wake-on-PS by default (see
   [Firmware variants](#firmware-variants))
 
 ## Configuring
@@ -79,12 +79,22 @@ work on Windows too (see [Firmware variants](#firmware-variants)).
 | Disadvantages | Windows will not allow to access the Browser Config Tool | Might be detected by Anti Cheat |
 | Config tools on Windows | no | yes |
 | Default polling rate | 250 Hz (stock) | real-time / 1 kHz |
+| Wake PC from sleep with PS button (`enable_wake`) | off (opt-in) | on |
 
 Waveshare RP2350B-Plus-W builds: `ds4-bridge-waveshare.uf2` (vanilla) and
 `ds4-bridge-waveshare-opinionated.uf2`.
 
-The default polling rate only applies to a fresh config; a dongle that already
-has a saved config keeps its `polling_rate_mode` when you switch variants.
+The defaults only apply to a fresh config; a dongle that already has a saved
+config keeps its `polling_rate_mode` and `enable_wake` when you switch variants.
+
+With wake enabled the dongle adds a small HID keyboard interface, sets the
+USB remote-wakeup bit and stays on USB while no controller is connected. When
+the PC sleeps, the dongle switches the controller off after ~3 s (in both
+variants). Pressing PS turns it back on; as soon as it reconnects the dongle
+signals a USB resume and sends F15 keystrokes so Windows stays awake (any
+button does the same if the controller is still connected). The PC's BIOS/OS
+must allow USB wake (on Windows: Device Manager → the dongle's HID keyboard →
+Power Management → "Allow this device to wake the computer").
 
 ## Flashing
 

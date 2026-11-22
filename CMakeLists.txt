@@ -27,9 +27,10 @@ endif ()
 option(PICO_W_BUILD "Build for Rasberry Pi Pico W, audio is missing" OFF)
 # Opinionated variant: trades USB indistinguishability for features. Declares the
 # config reports 0xF6-0xF9 in the HID report descriptor (so config_tool.py and
-# config_web.html work on Windows too) and defaults to the 1 kHz polling rate.
+# config_web.html work on Windows too) and, for a fresh config, defaults to the
+# 1 kHz polling rate and to wake-on-PS (enable_wake=1, see src/wake.cpp).
 # The vanilla build (OFF) stays byte-identical to a DS4 v2.
-option(OPINIONATED "Opinionated build: Windows-configurable, 1 kHz default" OFF)
+option(OPINIONATED "Opinionated build: Windows-configurable, 1 kHz + wake-on-PS default" OFF)
 option(WAVESHARE_RP2350B_PLUS_W_BUILD "Build for Waveshare RP2350B-Plus-W (USB-C, 16MB flash, RM2 wireless)" OFF)
 
 if (PICO_W_BUILD AND WAVESHARE_RP2350B_PLUS_W_BUILD)

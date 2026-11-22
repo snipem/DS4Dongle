@@ -113,7 +113,15 @@ void config_valid() {
         printf("[Config] speaker_select is invalid\n");
     }
     if (body->enable_wake > 1) {
-        body->enable_wake = 0;
+        // Default for a fresh/invalid config. enable_wake lets the controller
+        // wake a suspended host (wake.cpp): the controller reconnecting (PS
+        // press after the dongle powered it off) or any button change triggers
+        // a USB remote wakeup followed by F15 keystrokes on the extra boot
+        // keyboard interface. It also keeps the dongle on the bus when the
+        // controller disconnects (bt.cpp). Off in vanilla because the keyboard
+        // interface, the REMOTE_WAKEUP bit and the USB 2.1 BOS descriptor make
+        // the dongle distinguishable from a real DS4 v2; on in opinionated.
+        body->enable_wake = OPINIONATED ? 1 : 0;
         printf("[Config] enable_wake is invalid\n");
     }
     if (body->trigger_reduce > 10) {
